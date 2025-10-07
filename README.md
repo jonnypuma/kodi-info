@@ -26,13 +26,7 @@ A Python script that connects to a Kodi device via JSON-RPC to retrieve comprehe
 
 ## Quick Start with Docker (Recommended)
 
-### 1. Clone the Repository
-```bash
-git clone <repository-url>
-cd kodiinfo
-```
-
-### 2. Configure Environment
+### 1. Configure Environment
 ```bash
 # Copy the example environment file
 cp env.example .env
@@ -41,52 +35,48 @@ cp env.example .env
 # IMPORTANT: Update KODI_HOST with your actual Kodi device URL
 ```
 
-### 3. Start with Docker Compose
+### 2. Docker Commands
+
+#### Build and Docker Run
 ```bash
-docker-compose up -d
+# Build the image
+docker build -t kodi-info .
+
+# Run with environment variables
+docker run -d \
+  --name kodi-info \
+  -p 5005:5005 \
+  -e KODI_HOST=http://192.168.0.120:6666 \
+  kodi-info
 ```
 
-### 4. Access the Dashboard
-Open your browser to `http://localhost:5005` or use the URL in Homarr iframe.
+#### Using Docker Compose
+```bash
+# Make sure you have a .env file first!
+cp env.example .env
+# Edit .env with your settings
 
-## Manual Installation
+# Start services
+docker-compose up -d
 
-1. Clone or download this repository
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+# View logs
+docker-compose logs -f
+
+# Stop services
+docker-compose down
+
+# Rebuild and restart
+docker-compose up -d --build
+```
+
+### 3. Access the Dashboard
+Open your browser to `http://localhost:5005` or use your container host's IP. 
 
 ## Usage
 
 ### Web Server Mode (For Homarr Integration)
 ```bash
 python kodi_info.py --host http://192.168.0.120:6666 --web-server --web-port 5005
-```
-
-### Basic Usage
-```bash
-python kodi_info.py --host http://192.168.0.120:6666
-```
-
-### With Custom Port
-```bash
-python kodi_info.py --host 192.168.1.100 --port 8080
-```
-
-### With Authentication
-```bash
-python kodi_info.py --host http://ip_address:port --username kodi --password mypass
-```
-
-### Save to HTML File
-```bash
-python kodi_info.py --host http://ip_address:port --save-html --html-file my_stats.html
-```
-
-### Save to JSON File
-```bash
-python kodi_info.py --host http://ip_address:port --save-json --json-file my_stats.json
 ```
 
 ## Command Line Options
@@ -137,8 +127,6 @@ KODI_PASSWORD=your_kodi_http_password
 # Web Server Settings
 WEB_PORT=5005
 ```
-
-**Note**: The docker-compose.yml now requires all environment variables to be defined in your `.env` file.
 
 ## Output
 
@@ -217,40 +205,6 @@ When using `--save-json`, the output file contains:
 - Verify media sources are properly configured
 - Check that library is not empty
 
-## Docker Commands
-
-### Build and Run
-```bash
-# Build the image
-docker build -t kodi-info .
-
-# Run with environment variables
-docker run -d \
-  --name kodi-info \
-  -p 5005:5005 \
-  -e KODI_HOST=http://192.168.0.120:6666 \
-  kodi-info
-```
-
-### Using Docker Compose
-```bash
-# Make sure you have a .env file first!
-cp env.example .env
-# Edit .env with your settings
-
-# Start services
-docker-compose up -d
-
-# View logs
-docker-compose logs -f
-
-# Stop services
-docker-compose down
-
-# Rebuild and restart
-docker-compose up -d --build
-```
-
 ## Dependencies
 
 - `kodipydent`: Python client for Kodi JSON-RPC API
@@ -260,4 +214,5 @@ docker-compose up -d --build
 ## License
 
 This script is provided as-is for educational and personal use.
+
 
