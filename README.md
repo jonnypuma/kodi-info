@@ -27,13 +27,20 @@ A Python script that connects to a Kodi device via JSON-RPC to retrieve comprehe
 ## Quick Start with Docker (Recommended)
 
 ### 1. Configure Environment
-```bash
-# Copy the example environment file
-cp env.example .env
+**IMPORTANT**: You must create a `.env` file with your Kodi settings (no defaults provided):
 
-# Edit .env with your Kodi settings
-# IMPORTANT: Update KODI_HOST with your actual Kodi device URL
+```bash
+# Kodi Connection Settings (REQUIRED)
+KODI_HOST=ip_address:port
+KODI_USERNAME=your_kodi_http_user
+KODI_PASSWORD=your_kodi_http_password
+
+# Web Server Settings
+WEB_PORT=5005
+
+# IMPORTANT: Update KODI_HOST and USER and PASS with your actual Kodi device URL
 ```
+
 
 ### 2. Docker Commands
 
@@ -72,13 +79,6 @@ docker-compose up -d --build
 ### 3. Access the Dashboard
 Open your browser to `http://localhost:5005` or use your container host's IP. 
 
-## Usage
-
-### Web Server Mode (For Homarr Integration)
-```bash
-python kodi_info.py --host http://192.168.0.120:6666 --web-server --web-port 5005
-```
-
 ## Command Line Options
 
 - `--host`: Kodi device URL (e.g., http://ip_address:port) or IP address (required)
@@ -113,20 +113,6 @@ python kodi_info.py --host http://192.168.0.120:6666 --web-server --web-port 500
    - Beautiful responsive design
    - Auto-refreshing every 5 minutes
    - Connection status and last update time
-
-### Docker Environment Variables
-
-**IMPORTANT**: You must create a `.env` file with your Kodi settings (no defaults provided):
-
-```bash
-# Kodi Connection Settings (REQUIRED)
-KODI_HOST=ip_address:port
-KODI_USERNAME=your_kodi_http_user
-KODI_PASSWORD=your_kodi_http_password
-
-# Web Server Settings
-WEB_PORT=5005
-```
 
 ## Output
 
@@ -214,5 +200,6 @@ When using `--save-json`, the output file contains:
 ## License
 
 This script is provided as-is for educational and personal use.
+
 
 
