@@ -47,7 +47,7 @@ WEB_PORT=5005
 #### Build and Docker Run
 ```bash
 # Build the image
-docker build -t kodi-info .
+docker build -t kodi-info
 
 # Run with environment variables - replace with your Kodi device user, password, IP and port.
 docker run -d \
@@ -200,6 +200,7 @@ When using `--save-json`, the output file contains:
 ## License
 
 This script is provided as-is for educational and personal use.
+
 
 
 
