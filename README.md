@@ -49,11 +49,11 @@ WEB_PORT=5005
 # Build the image
 docker build -t kodi-info .
 
-# Run with environment variables
+# Run with environment variables - replace with your Kodi device user, password, IP and port.
 docker run -d \
   --name kodi-info \
   -p 5005:5005 \
-  -e KODI_HOST=http://192.168.0.120:6666 \
+  -e KODI_HOST=http://user:pass:192.168.xxx.xxx:555 \
   kodi-info
 ```
 
@@ -200,6 +200,7 @@ When using `--save-json`, the output file contains:
 ## License
 
 This script is provided as-is for educational and personal use.
+
 
 
 
