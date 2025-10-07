@@ -17,16 +17,12 @@ A Python script that connects to a Kodi device via JSON-RPC to retrieve comprehe
 
 ## Prerequisites
 
-1. **Kodi Setup**: Enable JSON-RPC in Kodi
+ **Kodi Setup**: Enable JSON-RPC in Kodi
    - Go to `System` > `Settings` > `Network` > `Services`
    - Enable `Allow control of Kodi via HTTP`
    - Set port (default: 8080)
    - Optionally set username/password for authentication
 
-2. **Python Dependencies**: Install required packages
-   ```bash
-   pip install -r requirements.txt
-   ```
 
 ## Quick Start with Docker (Recommended)
 
@@ -264,3 +260,4 @@ docker-compose up -d --build
 ## License
 
 This script is provided as-is for educational and personal use.
+
