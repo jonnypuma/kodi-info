@@ -60,7 +60,6 @@ docker run -d \
 #### Using Docker Compose
 ```bash
 # Make sure you have a .env file first!
-cp env.example .env
 # Edit .env with your settings
 
 # Start services
@@ -200,6 +199,7 @@ When using `--save-json`, the output file contains:
 ## License
 
 This script is provided as-is for educational and personal use.
+
 
 
 
