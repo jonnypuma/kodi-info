@@ -4,6 +4,7 @@ services:
   kodi-info:
     build: .
     container_name: kodi-info
+    image: kodi-info
     restart: unless-stopped
     ports:
       - "5005:5005"
