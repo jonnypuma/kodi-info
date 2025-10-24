@@ -75,11 +75,6 @@ docker compose up -d --build
 
 ### 3. Access the Dashboard
 Open your browser to `http://localhost:5005` or use your container host's IP:5005. 
-- **The widget will display**:
-   - Real-time Kodi library statistics
-   - Beautiful responsive design
-   - Auto-refreshing every 5 minutes
-   - Connection status and last update time
 
 
 ## Homarr Integration
@@ -125,31 +120,6 @@ The script also provides formatted console output:
    Total Artists:       456
    Total Albums:        234
    Total Songs:         7,890
-```
-
-## JSON Output Format
-
-When using `--save-json`, the output file contains:
-
-```json
-{
-  "movies": {
-    "total": 1234,
-    "watched": 567,
-    "unwatched": 667
-  },
-  "tv_shows": {
-    "total_shows": 89,
-    "total_episodes": 12345,
-    "watched_episodes": 8901,
-    "unwatched_episodes": 3444
-  },
-  "music": {
-    "total_artists": 456,
-    "total_albums": 234,
-    "total_songs": 7890
-  }
-}
 ```
 
 ## Troubleshooting
