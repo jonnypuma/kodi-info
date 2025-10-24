@@ -27,20 +27,18 @@ A Python script that connects to a Kodi device via JSON-RPC to retrieve comprehe
 ## Quick Start with Docker (Recommended)
 
 ### 1. Configure Environment
-**IMPORTANT**: You must create a `.env` file with your Kodi settings (no defaults provided):
+**IMPORTANT**: You must edit the supplied .env file or create a new `.env` file with your Kodi settings (no defaults provided):
 
 ```bash
 # Kodi Connection Settings (REQUIRED)
-KODI_HOST=ip_address:port
+KODI_HOST=http://ip_address:port
 KODI_USERNAME=your_kodi_http_user
 KODI_PASSWORD=your_kodi_http_password
 
 # Web Server Settings
 WEB_PORT=5005
 
-# IMPORTANT: Update KODI_HOST and USER and PASS with your actual Kodi device URL
 ```
-
 
 ### 2. Docker Commands
 
@@ -63,16 +61,16 @@ docker run -d \
 # Edit .env with your settings
 
 # Start services
-docker-compose up -d
+docker compose up -d
 
 # View logs
-docker-compose logs -f
+docker compose logs -f
 
 # Stop services
-docker-compose down
+docker compose down
 
 # Rebuild and restart
-docker-compose up -d --build
+docker compose up -d --build
 ```
 
 ### 3. Access the Dashboard
@@ -97,7 +95,7 @@ Open your browser to `http://localhost:5005` or use your container host's IP.
 
 1. **Start the web server** (using Docker or manually):
    ```bash
-   docker-compose up -d
+   docker compose up -d
    ```
 
 2. **In Homarr**:
@@ -199,9 +197,3 @@ When using `--save-json`, the output file contains:
 ## License
 
 This script is provided as-is for educational and personal use.
-
-
-
-
-
-
