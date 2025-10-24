@@ -74,42 +74,23 @@ docker compose up -d --build
 ```
 
 ### 3. Access the Dashboard
-Open your browser to `http://localhost:5005` or use your container host's IP. 
+Open your browser to `http://localhost:5005` or use your container host's IP:5005. 
+- **The widget will display**:
+   - Real-time Kodi library statistics
+   - Beautiful responsive design
+   - Auto-refreshing every 5 minutes
+   - Connection status and last update time
 
-## Command Line Options
-
-- `--host`: Kodi device URL (e.g., http://ip_address:port) or IP address (required)
-- `--port`: Kodi HTTP port (optional, extracted from host URL if provided)
-- `--username`: Kodi username (optional)
-- `--password`: Kodi password (optional)
-- `--web-server`: Start web server for Homarr integration
-- `--web-port`: Web server port (default: 5005)
-- `--save-html`: Save statistics to HTML file
-- `--html-file`: HTML output filename (default: kodi_stats.html)
-- `--save-json`: Save statistics to JSON file
-- `--json-file`: JSON output filename (default: kodi_library_stats.json)
 
 ## Homarr Integration
 
 ### Adding to Homarr Dashboard
 
-1. **Start the web server** (using Docker or manually):
-   ```bash
-   docker compose up -d
-   ```
-
-2. **In Homarr**:
    - Go to Settings → Widgets
    - Add a new "Iframe" widget
    - Set the URL to: `http://your-server:5005`
    - Configure the widget size and position
    - Save the configuration
-
-3. **The widget will display**:
-   - Real-time Kodi library statistics
-   - Beautiful responsive design
-   - Auto-refreshing every 5 minutes
-   - Connection status and last update time
 
 ## Output
 
@@ -197,3 +178,8 @@ When using `--save-json`, the output file contains:
 ## License
 
 This script is provided as-is for educational and personal use.
+
+
+
+
+
