@@ -556,6 +556,37 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
         .btn {{ background: #007bff; color: white; border: none; padding: 10px 20px; margin: 0 10px; border-radius: 5px; cursor: pointer; }}
         .btn:hover {{ background: #0056b3; }}
         .btn:disabled {{ background: #6c757d; cursor: not-allowed; }}
+        /* Image overlay for zoomed artwork */
+        .image-overlay {{
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.85);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.25s ease;
+            z-index: 9999;
+        }}
+        .image-overlay.visible {{
+            opacity: 1;
+            pointer-events: auto;
+        }}
+        .image-overlay img {{
+            max-width: 80vw;
+            max-height: 80vh;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.8);
+            transform: scale(0.25);
+            transition: transform 0.25s ease;
+        }}
+        .image-overlay.visible img {{
+            transform: scale(1);
+        }}
+        .zoomable {{
+            cursor: zoom-in;
+        }}
     </style>
 </head>
 <body>
@@ -640,6 +671,9 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
             <button id="update-audio-btn" class="btn" onclick="updateLibrary('audio')">Update Audio Library</button>
         </div>
     </div>
+    <div id="image-overlay" class="image-overlay">
+        <img id="overlay-image" src="" alt="Artwork preview">
+    </div>
     
     <script>
         function updateLibrary(type) {{
@@ -687,6 +721,34 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
             // Show next reload time in console for debugging
             const nextReload = new Date(Date.now() + 24 * 60 * 60 * 1000);
             console.log('Page will auto-reload at:', nextReload.toLocaleString());
+
+            // Click-to-zoom for artwork images
+            const overlay = document.getElementById('image-overlay');
+            const overlayImg = document.getElementById('overlay-image');
+            const zoomableImages = document.querySelectorAll('.movie-poster, .episode-thumb, .album-cover');
+
+            zoomableImages.forEach(img => {{
+                img.classList.add('zoomable');
+                img.addEventListener('click', event => {{
+                    event.stopPropagation();
+                    overlayImg.src = img.src;
+                    overlay.classList.add('visible');
+                }});
+            }});
+
+            // Close overlay on any click
+            overlay.addEventListener('click', () => {{
+                overlay.classList.remove('visible');
+                overlayImg.src = '';
+            }});
+
+            // Also close on Escape key
+            document.addEventListener('keydown', event => {{
+                if (event.key === 'Escape' && overlay.classList.contains('visible')) {{
+                    overlay.classList.remove('visible');
+                    overlayImg.src = '';
+                }}
+            }});
     </script>
 </body>
 </html>
