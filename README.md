@@ -14,6 +14,7 @@ A Python script that connects to a Kodi device via JSON-RPC to retrieve comprehe
 - **JSON Export**: Save statistics to JSON file
 - **Error Handling**: Robust connection and data handling
 - **Command Line Interface**: Easy configuration via command line arguments
+ - **Artwork Zoom**: Click any movie cover, episode thumbnail, or album cover to open a large animated preview; click anywhere or press Escape to close
 
 ## Prerequisites
 
