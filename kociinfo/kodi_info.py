@@ -669,6 +669,7 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
         <div class="buttons">
             <button id="update-video-btn" class="btn" onclick="updateLibrary('video')">Update Video Library</button>
             <button id="update-audio-btn" class="btn" onclick="updateLibrary('audio')">Update Audio Library</button>
+            <img src="/refresh.png" alt="Refresh" onclick="location.reload()" style="width: 40px; height: 40px; margin-left: 10px; cursor: pointer; vertical-align: middle;" title="Refresh page">
         </div>
     </div>
     <div id="image-overlay" class="image-overlay">
@@ -936,6 +937,18 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
             return send_file('new.png', mimetype='image/png')
         except Exception as e:
             return f"New icon not found: {str(e)}", 404
+    
+    @app.route('/refresh.png')
+    def serve_refresh_icon():
+        """Serve refresh icon"""
+        try:
+            refresh_path = "/app/refresh.png"
+            if os.path.exists(refresh_path):
+                return send_file(refresh_path, mimetype='image/png')
+            else:
+                return "Refresh icon not found", 404
+        except Exception as e:
+            return f"Error serving refresh icon: {str(e)}", 500
     
     @app.route('/health')
     def health():
