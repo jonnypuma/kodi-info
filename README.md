@@ -1,6 +1,6 @@
 # Kodi Library Information Script
 
-A Python script that connects to a Kodi device via JSON-RPC to retrieve comprehensive library statistics. Uses Docker with HTML output for either browser display or Homarr dashboard integration!
+A Python script that connects to a Kodi device via JSON-RPC to retrieve comprehensive library statistics. Now with Docker support and HTML output for Homarr dashboard integration!
 
 ## Features
 
@@ -11,10 +11,12 @@ A Python script that connects to a Kodi device via JSON-RPC to retrieve comprehe
 - **Docker Support**: Easy deployment with Docker and Docker Compose
 - **Web Server**: Built-in Flask web server for real-time statistics
 - **Auto-refresh**: Statistics automatically refresh every 5 minutes
+- **Manual Refresh**: Click the refresh button to instantly reload statistics
+- **Library Update Buttons**: Update video and audio libraries directly from the web interface
 - **JSON Export**: Save statistics to JSON file
 - **Error Handling**: Robust connection and data handling
 - **Command Line Interface**: Easy configuration via command line arguments
- - **Artwork Zoom**: Click any movie cover, episode thumbnail, or album cover to open a large animated preview; click anywhere or press Escape to close
+- **Artwork Zoom**: Click any movie cover, episode thumbnail, or album cover to open a large animated preview; click anywhere or press Escape to close
 
 ## Prerequisites
 
@@ -98,10 +100,43 @@ The web interface provides a beautiful, responsive dashboard showing:
 - **Music**: Total artists, albums, and songs
 - **Connection Info**: Kodi host and last update time
 - **Auto-refresh**: Updates every 5 minutes
+- **Manual Refresh Button**: Click the refresh icon next to the update buttons to instantly reload the page and fetch fresh statistics
+- **Library Update Buttons**: Update Video Library and Update Audio Library buttons to trigger Kodi library scans
 
 ### Console Output
-The script also provides formatted console output:
+The script can output statistics directly to the console. Run the script without the `--web-server` flag:
 
+**Basic command:**
+```bash
+python kodi_info.py --host http://192.168.1.10:555
+```
+
+**With IP and port separately:**
+```bash
+python kodi_info.py --host 192.168.1.100 --port 8080
+```
+
+**With authentication:**
+```bash
+python kodi_info.py --host 192.168.1.100 --port 8080 --username kodi --password mypass
+```
+
+**Save to HTML file (still prints to console):**
+```bash
+python kodi_info.py --host http://192.168.1.10:555 --save-html
+```
+
+**Save to JSON file (still prints to console):**
+```bash
+python kodi_info.py --host http://192.168.1.10:555 --save-json
+```
+
+**Save to both HTML and JSON:**
+```bash
+python kodi_info.py --host http://192.168.1.10:555 --save-html --save-json
+```
+
+**Example console output:**
 ```
 🎬 KODI LIBRARY STATISTICS
 ============================================================
@@ -149,7 +184,6 @@ The script also provides formatted console output:
 ## License
 
 This script is provided as-is for educational and personal use.
-
 
 
 
