@@ -13,6 +13,7 @@ A Python script that connects to a Kodi device via JSON-RPC to retrieve comprehe
 - **Auto-refresh**: Statistics automatically refresh every 5 minutes
 - **Manual Refresh**: Click the refresh button to instantly reload statistics
 - **Library Update Buttons**: Update video and audio libraries directly from the web interface
+- **Library Clean Buttons**: Clean video and music libraries directly from the web interface
 - **JSON Export**: Save statistics to JSON file
 - **Error Handling**: Robust connection and data handling
 - **Command Line Interface**: Easy configuration via command line arguments
@@ -100,8 +101,9 @@ The web interface provides a beautiful, responsive dashboard showing:
 - **Music**: Total artists, albums, and songs
 - **Connection Info**: Kodi host and last update time
 - **Auto-refresh**: Updates every 5 minutes
-- **Manual Refresh Button**: Click the refresh icon next to the update buttons to instantly reload the page and fetch fresh statistics
+- **Manual Refresh Button**: Click the refresh icon next to the buttons to instantly reload the page and fetch fresh statistics
 - **Library Update Buttons**: Update Video Library and Update Audio Library buttons to trigger Kodi library scans
+- **Library Clean Buttons**: Clean Video Library and Clean Music Library buttons to remove missing items from Kodi libraries
 
 ### Console Output
 The script can output statistics directly to the console. Run the script without the `--web-server` flag:
