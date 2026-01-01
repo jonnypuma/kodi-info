@@ -552,7 +552,7 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
             .recent-entry .episode-thumb {{ width: 70px; height: 40px; object-fit: cover; }}
             .recent-entry .album-cover {{ width: 50px; height: 50px; object-fit: cover; }}
             .no-image {{ width: 50px; height: 50px; background: rgba(255, 255, 255, 0.2); margin-right: 10px; display: flex; align-items: center; justify-content: center; border-radius: 8px; color: white; }}
-        .buttons {{ text-align: center; margin-top: 30px; }}
+        .buttons {{ text-align: center; margin-top: 30px; margin-bottom: 30px; }}
         .btn {{ background: #007bff; color: white; border: none; padding: 10px 20px; margin: 0 10px; border-radius: 5px; cursor: pointer; }}
         .btn:hover {{ background: #0056b3; }}
         .btn:disabled {{ background: #6c757d; cursor: not-allowed; }}
@@ -596,6 +596,14 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
             <h1>Library Statistics</h1>
             <p>Connected to: {kodi_host}</p>
             <p>Last updated: {last_updated}</p>
+        </div>
+        
+        <div class="buttons">
+            <button id="update-video-btn" class="btn" onclick="updateLibrary('video')">Update Video Library</button>
+            <button id="update-audio-btn" class="btn" onclick="updateLibrary('audio')">Update Audio Library</button>
+            <button id="clean-video-btn" class="btn" onclick="cleanLibrary('video')">Clean Video Library</button>
+            <button id="clean-music-btn" class="btn" onclick="cleanLibrary('music')">Clean Music Library</button>
+            <img src="/refresh.png" alt="Refresh" onclick="location.reload()" style="width: 40px; height: 40px; margin-left: 10px; cursor: pointer; vertical-align: middle;" title="Refresh page">
         </div>
         
         <div class="stats">
@@ -665,14 +673,6 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
                     </div>
                 </div>
             </div>
-        
-        <div class="buttons">
-            <button id="update-video-btn" class="btn" onclick="updateLibrary('video')">Update Video Library</button>
-            <button id="update-audio-btn" class="btn" onclick="updateLibrary('audio')">Update Audio Library</button>
-            <button id="clean-video-btn" class="btn" onclick="cleanLibrary('video')">Clean Video Library</button>
-            <button id="clean-music-btn" class="btn" onclick="cleanLibrary('music')">Clean Music Library</button>
-            <img src="/refresh.png" alt="Refresh" onclick="location.reload()" style="width: 40px; height: 40px; margin-left: 10px; cursor: pointer; vertical-align: middle;" title="Refresh page">
-        </div>
     </div>
     <div id="image-overlay" class="image-overlay">
         <img id="overlay-image" src="" alt="Artwork preview">

@@ -1,6 +1,6 @@
 # Kodi Library Information Script
 
-A Python script that connects to a Kodi device via JSON-RPC to retrieve comprehensive library statistics. Now with Docker support and HTML output for Homarr dashboard integration!
+A Python script that connects to a Kodi device via JSON-RPC to retrieve comprehensive library statistics. Docker-based with HTML output for web browser display or Homarr dashboard integration!
 
 ## Features
 
