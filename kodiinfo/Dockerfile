@@ -26,8 +26,8 @@ COPY music.png .
 COPY new.png .
 COPY refresh.png .
 
-# Ensure all image files are readable
-RUN chmod 644 *.png *.jpg *.ico
+# Ensure app and image files are readable
+RUN chmod 644 kodi_info.py *.png *.jpg *.ico
 
 # Create directory for output files
 RUN mkdir -p /app/output/artwork

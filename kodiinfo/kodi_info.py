@@ -22,6 +22,7 @@ import sys
 import os
 import time
 import threading
+import uuid
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime
@@ -450,7 +451,7 @@ def format_recent_item(item, item_type, kodi_host=None, probe=None):
         }
     return {}
 
-def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=None) -> str:
+def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=None, show_loading_overlay: bool = True) -> str:
     """Generate HTML output for Homarr iframe integration"""
     
     # Calculate percentages
@@ -502,8 +503,91 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
             '''
         return html
     
+    overlay_html = ""
+    overlay_script = ""
+    if show_loading_overlay:
+        overlay_html = """<div id="loading-overlay" class="loading-overlay" aria-live="polite">
+        <div class="loading-card">
+            <div class="loader" aria-label="Loading">
+                <span>L</span>
+                <span>O</span>
+                <span>A</span>
+                <span>D</span>
+                <span>I</span>
+                <span>N</span>
+                <span>G</span>
+            </div>
+            <div class="loading-bar">
+                <div id="loading-progress" class="loading-progress"></div>
+            </div>
+            <div id="loading-text" class="loading-text">Loading 0%</div>
+        </div>
+    </div>"""
+        overlay_script = """(function setupLoadingOverlay() {
+            const overlay = document.getElementById('loading-overlay');
+            const bar = document.getElementById('loading-progress');
+            const text = document.getElementById('loading-text');
+            if (!overlay || !bar || !text) return;
+
+            let totalAssets = 0;
+            let loadedAssets = 0;
+            let done = false;
+
+            function updateProgress() {
+                if (done) return;
+                const percent = totalAssets > 0 ? Math.min(100, Math.round((loadedAssets / totalAssets) * 100)) : 100;
+                bar.style.width = percent + '%';
+                text.textContent = 'Loading ' + percent + '%';
+                if (loadedAssets >= totalAssets) {
+                    done = true;
+                    overlay.classList.add('hidden');
+                    setTimeout(() => {
+                        overlay.style.display = 'none';
+                    }, 450);
+                }
+            }
+
+            function trackElement(el) {
+                totalAssets += 1;
+                if (el.complete) {
+                    loadedAssets += 1;
+                    updateProgress();
+                    return;
+                }
+                const finalize = () => {
+                    loadedAssets += 1;
+                    updateProgress();
+                };
+                el.addEventListener('load', finalize, { once: true });
+                el.addEventListener('error', finalize, { once: true });
+            }
+
+            const images = Array.from(document.images);
+            images.forEach(trackElement);
+
+            const bgImage = getComputedStyle(document.body).backgroundImage;
+            const bgMatch = bgImage && bgImage !== 'none' ? bgImage.match(/url\\(["']?(.*?)["']?\\)/) : null;
+            if (bgMatch && bgMatch[1]) {
+                totalAssets += 1;
+                const bgLoader = new Image();
+                const finalize = () => {
+                    loadedAssets += 1;
+                    updateProgress();
+                };
+                bgLoader.onload = finalize;
+                bgLoader.onerror = finalize;
+                bgLoader.src = bgMatch[1];
+            }
+
+            if (totalAssets === 0) {
+                updateProgress();
+            } else {
+                updateProgress();
+            }
+        })();"""
+
     # Clean HTML template
-    return f"""
+    html_content = f"""
 <!DOCTYPE html>
 <html>
 <head>
@@ -587,9 +671,83 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
         .zoomable {{
             cursor: zoom-in;
         }}
+        @import url("https://fonts.googleapis.com/css?family=Montserrat:900");
+        .loading-overlay {{
+            position: fixed;
+            inset: 0;
+            background-color: #141414;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 10000;
+            opacity: 0;
+            animation: fadeIn 0.5s ease forwards;
+            transition: opacity 0.4s ease;
+            font-family: "Montserrat", sans-serif;
+        }}
+        .loading-overlay.hidden {{
+            opacity: 0;
+            pointer-events: none;
+        }}
+        @keyframes fadeIn {{
+            from {{ opacity: 0; }}
+            to {{ opacity: 1; }}
+        }}
+        .loading-card {{
+            text-align: center;
+            color: white;
+            min-width: 320px;
+        }}
+        .loader {{
+            -webkit-perspective: 700px;
+            perspective: 700px;
+        }}
+        .loader > span {{
+            font-size: 96px;
+            display: inline-block;
+            animation: flip 2.6s infinite linear;
+            transform-origin: 0 70%;
+            transform-style: preserve-3d;
+            -webkit-transform-style: preserve-3d;
+            color: #4caf50;
+        }}
+        @keyframes flip {{
+            35% {{ transform: rotateX(360deg); }}
+            100% {{ transform: rotateX(360deg); }}
+        }}
+        .loader > span:nth-child(even) {{
+            color: white;
+        }}
+        .loader > span:nth-child(2) {{ animation-delay: 0.3s; }}
+        .loader > span:nth-child(3) {{ animation-delay: 0.6s; }}
+        .loader > span:nth-child(4) {{ animation-delay: 0.9s; }}
+        .loader > span:nth-child(5) {{ animation-delay: 1.2s; }}
+        .loader > span:nth-child(6) {{ animation-delay: 1.5s; }}
+        .loader > span:nth-child(7) {{ animation-delay: 1.8s; }}
+        .loading-bar {{
+            width: 100%;
+            height: 10px;
+            background: rgba(255, 255, 255, 0.18);
+            border-radius: 999px;
+            overflow: hidden;
+            margin-top: 33px;
+        }}
+        .loading-progress {{
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #4caf50, #7dd3fc);
+            transition: width 0.2s ease;
+        }}
+        .loading-text {{
+            margin-top: 10px;
+            font-size: 0.9em;
+            color: rgba(255, 255, 255, 0.8);
+            letter-spacing: 0.5px;
+        }}
     </style>
 </head>
 <body>
+    __LOADING_OVERLAY__
     <div class="container">
         <div class="header">
             <img src="/kodi.png" alt="Kodi Logo" style="height: 120px; margin-bottom: 10px;">
@@ -679,6 +837,8 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
     </div>
     
     <script>
+        __LOADING_SCRIPT__
+
         function updateLibrary(type) {{
             const button = document.getElementById('update-' + type + '-btn');
             button.disabled = true;
@@ -790,6 +950,9 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
 </body>
 </html>
     """
+    html_content = html_content.replace("__LOADING_OVERLAY__", overlay_html)
+    html_content = html_content.replace("__LOADING_SCRIPT__", overlay_script)
+    return html_content
 
 
 def print_statistics(stats: LibraryStats):
@@ -864,6 +1027,8 @@ def save_statistics_to_json(stats: LibraryStats, filename: str = "kodi_library_s
 def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
     """Create Flask web server to serve HTML statistics"""
     app = Flask(__name__)
+    load_jobs = {}
+    load_lock = threading.Lock()
     
     # Get Kodi connection details from environment variables - optionally input youur credenctials as fallcack below
     kodi_host = os.getenv("KODI_HOST", "http://192.168.1.10:555")
@@ -871,28 +1036,341 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
     kodi_password = os.getenv("KODI_PASSWORD", "pass")
     
 # Debug logging removed for security
+    def build_content_html(stats: LibraryStats, last_updated: str, show_loading_overlay: bool = True):
+        # Create probe instance
+# Debug logging removed for security
+        # Generate HTML (page is already refreshed automatically on startup)
+        probe = KodiLibraryProbe(kodi_host, None, kodi_username, kodi_password)
+        html_content = generate_html(stats, kodi_host, last_updated, probe, show_loading_overlay=show_loading_overlay)
+        return html_content
+
+    def generate_loading_html():
+        return f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Loading...</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+    <style>
+        @import url("https://fonts.googleapis.com/css?family=Montserrat:900");
+        body {{
+            background-color: #141414;
+            padding: 0;
+            margin: 0;
+            height: 100vh;
+            width: 100vw;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: "Montserrat", sans-serif;
+            opacity: 0;
+            animation: fadeIn 0.5s ease forwards;
+        }}
+        @keyframes fadeIn {{
+            from {{ opacity: 0; }}
+            to {{ opacity: 1; }}
+        }}
+        .loader {{
+            -webkit-perspective: 700px;
+            perspective: 700px;
+            text-align: center;
+        }}
+        .loader > span {{
+            font-size: 96px;
+            display: inline-block;
+            animation: flip 2.6s infinite linear;
+            transform-origin: 0 70%;
+            transform-style: preserve-3d;
+            -webkit-transform-style: preserve-3d;
+            color: #4caf50;
+        }}
+        @keyframes flip {{
+            35% {{ transform: rotateX(360deg); }}
+            100% {{ transform: rotateX(360deg); }}
+        }}
+        .loader > span:nth-child(even) {{
+            color: white;
+        }}
+        .loader > span:nth-child(2) {{ animation-delay: 0.3s; }}
+        .loader > span:nth-child(3) {{ animation-delay: 0.6s; }}
+        .loader > span:nth-child(4) {{ animation-delay: 0.9s; }}
+        .loader > span:nth-child(5) {{ animation-delay: 1.2s; }}
+        .loader > span:nth-child(6) {{ animation-delay: 1.5s; }}
+        .loader > span:nth-child(7) {{ animation-delay: 1.8s; }}
+        .loading-bar {{
+            width: 320px;
+            height: 10px;
+            background: rgba(255, 255, 255, 0.18);
+            border-radius: 999px;
+            overflow: hidden;
+            margin: 33px auto 0;
+        }}
+        .loading-progress {{
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #4caf50, #7dd3fc);
+            transition: width 0.2s ease;
+        }}
+        .loading-text {{
+            margin-top: 10px;
+            font-size: 0.9em;
+            color: rgba(255, 255, 255, 0.8);
+            letter-spacing: 0.5px;
+            text-align: center;
+        }}
+    </style>
+</head>
+<body>
+    <div class="loader">
+        <span>L</span>
+        <span>O</span>
+        <span>A</span>
+        <span>D</span>
+        <span>I</span>
+        <span>N</span>
+        <span>G</span>
+        <div class="loading-bar">
+            <div id="loading-progress" class="loading-progress"></div>
+        </div>
+        <div id="loading-text" class="loading-text">Loading 0%</div>
+    </div>
+    <script>
+        const bar = document.getElementById('loading-progress');
+        const text = document.getElementById('loading-text');
+        let jobId = null;
+        let pollTimer = null;
+
+        function updateProgress(value, message) {{
+            const percent = Math.min(100, Math.max(0, Math.round(value)));
+            bar.style.width = percent + '%';
+            text.textContent = message ? message + ' ' + percent + '%' : 'Loading ' + percent + '%';
+        }}
+
+        function pollStatus() {{
+            if (!jobId) return;
+            fetch('/load-status/' + jobId)
+                .then(response => response.json())
+                .then(data => {{
+                    updateProgress(data.progress || 0, data.message || 'Loading');
+                    if (data.status === 'done') {{
+                        clearInterval(pollTimer);
+                        fetch('/content/' + jobId)
+                            .then(response => response.text())
+                            .then(html => {{
+                                document.body.style.opacity = '0';
+                                document.body.style.transition = 'opacity 0.4s ease';
+                                setTimeout(() => {{
+                                    document.open();
+                                    document.write(html);
+                                    document.close();
+                                }}, 400);
+                            }});
+                    }} else if (data.status === 'error') {{
+                        clearInterval(pollTimer);
+                        text.textContent = data.message || 'Error loading';
+                    }}
+                }})
+                .catch(() => {{
+                    // keep polling in case of transient errors
+                }});
+        }}
+
+        function startLoad() {{
+            fetch('/start-load')
+                .then(response => {{
+                    if (!response.ok) {{
+                        throw new Error('HTTP ' + response.status);
+                    }}
+                    return response.json();
+                }})
+                .then(data => {{
+                    jobId = data.job_id;
+                    pollTimer = setInterval(pollStatus, 500);
+                    pollStatus();
+                }})
+                .catch(() => {{
+                    window.location.href = '/content/fallback';
+                }});
+        }}
+
+        setTimeout(startLoad, 100);
+    </script>
+</body>
+</html>
+        """
     
     @app.route('/')
     def index():
+        return generate_loading_html()
+
+    def update_job(job_id: str, progress: int, message: str = None, status: str = "running"):
+        with load_lock:
+            job = load_jobs.get(job_id)
+            if not job:
+                return
+            job["progress"] = min(100, max(0, int(progress)))
+            if message is not None:
+                job["message"] = message
+            job["status"] = status
+            job["updated_at"] = time.time()
+
+    def run_load_job(job_id: str):
         try:
-            # Create probe instance
-# Debug logging removed for security
+            update_job(job_id, 5, "Connecting")
             probe = KodiLibraryProbe(kodi_host, None, kodi_username, kodi_password)
-            
-            # Connect to Kodi
             if not probe.connect():
-                return f"<h1>Error: Could not connect to Kodi at {kodi_host}</h1>", 500
-            
-            # Get statistics
-            stats = probe.get_all_statistics()
+                update_job(job_id, 100, "Failed to connect", status="error")
+                return
+            stats = LibraryStats()
+
+            # Movies (fine-grained progress)
+            update_job(job_id, 10, "Movies")
+            movies_result = probe._make_request("VideoLibrary.GetMovies", {
+                "properties": ["playcount"],
+                "limits": {"start": 0, "end": 100000}
+            })
+            movies = movies_result.get("result", {}).get("movies", [])
+            limits = movies_result.get("result", {}).get("limits", {})
+            stats.total_movies = limits.get("total", 0)
+            watched_movies = 0
+            movie_count = len(movies)
+            if movie_count == 0:
+                update_job(job_id, 25, "Movies")
+            else:
+                step = max(1, movie_count // 20)
+                for idx, movie in enumerate(movies, 1):
+                    if movie.get("playcount", 0) > 0:
+                        watched_movies += 1
+                    if idx % step == 0 or idx == movie_count:
+                        progress = 10 + int(15 * (idx / movie_count))
+                        update_job(job_id, progress, "Movies")
+            stats.watched_movies = watched_movies
+
+            # TV shows + episodes (somewhat fine-grained)
+            update_job(job_id, 30, "TV shows")
+            tv_shows_result = probe._make_request("VideoLibrary.GetTVShows", {
+                "limits": {"start": 0, "end": 100000}
+            })
+            stats.total_tv_shows = tv_shows_result.get("result", {}).get("limits", {}).get("total", 0)
+            update_job(job_id, 35, "TV stats")
+            stats_result = probe._make_request("VideoLibrary.GetStatistics", {}, timeout=30)
+            if stats_result and "result" in stats_result:
+                statistics = stats_result["result"].get("statistics", {})
+                stats.total_episodes = statistics.get("episode", 0)
+                stats.watched_episodes = statistics.get("episode.watched", 0)
+                update_job(job_id, 45, "TV stats")
+            else:
+                update_job(job_id, 36, "Episodes")
+                episodes_result = probe._make_request("VideoLibrary.GetEpisodes", {
+                    "properties": ["playcount"],
+                    "limits": {"start": 0, "end": 100000}
+                }, timeout=120)
+                episodes = episodes_result.get("result", {}).get("episodes", [])
+                stats.total_episodes = episodes_result.get("result", {}).get("limits", {}).get("total", 0)
+                watched_episodes = 0
+                episode_count = len(episodes)
+                if episode_count == 0:
+                    update_job(job_id, 55, "Episodes")
+                else:
+                    step = max(1, episode_count // 20)
+                    for idx, episode in enumerate(episodes, 1):
+                        if episode.get("playcount", 0) > 0:
+                            watched_episodes += 1
+                        if idx % step == 0 or idx == episode_count:
+                            progress = 36 + int(19 * (idx / episode_count))
+                            update_job(job_id, progress, "Episodes")
+                stats.watched_episodes = watched_episodes
+
+            # Music (per-request progress)
+            update_job(job_id, 58, "Artists")
+            artists_result = probe._make_request("AudioLibrary.GetArtists", {
+                "limits": {"start": 0, "end": 100000}
+            })
+            stats.total_artists = artists_result.get("result", {}).get("limits", {}).get("total", 0)
+            update_job(job_id, 65, "Albums")
+            albums_result = probe._make_request("AudioLibrary.GetAlbums", {
+                "limits": {"start": 0, "end": 100000}
+            })
+            stats.total_albums = albums_result.get("result", {}).get("limits", {}).get("total", 0)
+            update_job(job_id, 72, "Songs")
+            songs_result = probe._make_request("AudioLibrary.GetSongs", {
+                "limits": {"start": 0, "end": 100000}
+            })
+            stats.total_songs = songs_result.get("result", {}).get("limits", {}).get("total", 0)
+
+            # Recently added (per-section progress)
+            update_job(job_id, 78, "Recent episodes")
+            recent = RecentlyAdded()
+            episodes_result = probe._make_request("VideoLibrary.GetRecentlyAddedEpisodes", {
+                "properties": ["title", "showtitle", "season", "episode", "dateadded", "art"],
+                "limits": {"start": 0, "end": 10}
+            })
+            recent.episodes = episodes_result.get("result", {}).get("episodes", [])
+            update_job(job_id, 84, "Recent movies")
+            movies_result = probe._make_request("VideoLibrary.GetRecentlyAddedMovies", {
+                "properties": ["title", "year", "dateadded", "art", "rating"],
+                "limits": {"start": 0, "end": 10}
+            })
+            recent.movies = movies_result.get("result", {}).get("movies", [])
+            update_job(job_id, 90, "Recent albums")
+            albums_result = probe._make_request("AudioLibrary.GetRecentlyAddedAlbums", {
+                "properties": ["title", "artist", "year", "dateadded", "art"],
+                "limits": {"start": 0, "end": 10}
+            })
+            recent.albums = albums_result.get("result", {}).get("albums", [])
+            stats.recently_added = recent
+
+            update_job(job_id, 95, "Rendering")
             last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            # Generate HTML (page is already refreshed automatically on startup)
-            html_content = generate_html(stats, kodi_host, last_updated, probe)
-            return html_content
-            
+            html_content = build_content_html(stats, last_updated, show_loading_overlay=False)
+            with load_lock:
+                job = load_jobs.get(job_id)
+                if job is not None:
+                    job["html"] = html_content
+            update_job(job_id, 100, "Done", status="done")
         except Exception as e:
-            return f"<h1>Error: {str(e)}</h1>", 500
+            update_job(job_id, 100, f"Error: {str(e)}", status="error")
+
+    @app.route('/start-load')
+    def start_load():
+        job_id = uuid.uuid4().hex
+        with load_lock:
+            load_jobs[job_id] = {
+                "status": "pending",
+                "progress": 0,
+                "message": "Starting",
+                "created_at": time.time(),
+                "updated_at": time.time(),
+                "html": None
+            }
+        thread = threading.Thread(target=run_load_job, args=(job_id,), daemon=True)
+        thread.start()
+        return jsonify({"job_id": job_id})
+
+    @app.route('/load-status/<job_id>')
+    def load_status(job_id):
+        with load_lock:
+            job = load_jobs.get(job_id)
+            if not job:
+                return jsonify({"status": "missing", "progress": 0, "message": "Not found"}), 404
+            return jsonify({
+                "status": job["status"],
+                "progress": job["progress"],
+                "message": job.get("message", "")
+            })
+
+    @app.route('/content/<job_id>')
+    def content(job_id):
+        if job_id == "fallback":
+            return "<h1>Loading failed. Please refresh.</h1>", 503
+        with load_lock:
+            job = load_jobs.get(job_id)
+            if not job:
+                return "<h1>Loading job not found.</h1>", 404
+            if job["status"] != "done" or not job.get("html"):
+                return "<h1>Still loading...</h1>", 202
+            html_content = job["html"]
+        return html_content
     
     
     @app.route('/favicon.ico')
