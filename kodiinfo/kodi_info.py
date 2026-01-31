@@ -637,7 +637,7 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
             .recent-entry .album-cover {{ width: 50px; height: 50px; object-fit: cover; }}
             .no-image {{ width: 50px; height: 50px; background: rgba(255, 255, 255, 0.2); margin-right: 10px; display: flex; align-items: center; justify-content: center; border-radius: 8px; color: white; }}
         .buttons {{ text-align: center; margin-top: 30px; margin-bottom: 30px; }}
-        .btn {{ background: #007bff; color: white; border: none; padding: 10px 20px; margin: 0 10px; border-radius: 5px; cursor: pointer; }}
+        .btn {{ background: #007bff; color: white; border: none; padding: 10px 20px; margin: 0 10px; border-radius: 5px; cursor: pointer; min-width: 190px; display: inline-flex; align-items: center; justify-content: center; }}
         .btn:hover {{ background: #0056b3; }}
         .btn:disabled {{ background: #6c757d; cursor: not-allowed; }}
         /* Image overlay for zoomed artwork */
