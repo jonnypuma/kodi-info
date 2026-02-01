@@ -1472,37 +1472,23 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
     def update_video_library():
         """Update video library using Kodi JSON-RPC"""
         try:
-            import subprocess
-            
-            # Build curl command for video library scan
-            curl_cmd = [
-                'curl', '-X', 'POST',
-                '-H', 'Content-Type: application/json',
-                '-d', '{"jsonrpc": "2.0", "method": "VideoLibrary.Scan", "id": 1}'
-            ]
-            
-            # Add authentication if provided
-            if kodi_username and kodi_password:
-                # kodi_host already includes http://, so we need to insert auth
-                auth_url = kodi_host.replace('http://', f'http://{kodi_username}:{kodi_password}@')
-                curl_cmd.append(f'{auth_url}/jsonrpc')
-            else:
-                curl_cmd.append(f'{kodi_host}/jsonrpc')
-            
-            # Execute curl command
-            result = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=30)
-            
-            if result.returncode == 0:
-                # Check if response contains "OK"
-                if '"result":"OK"' in result.stdout:
-                    return jsonify({"success": True, "message": "Video library update started successfully"})
-                else:
-                    return jsonify({"success": False, "message": f"Unexpected response: {result.stdout}"})
-            else:
-                return jsonify({"success": False, "message": f"Error: {result.stderr}"})
-                
-        except subprocess.TimeoutExpired:
+            payload = {"jsonrpc": "2.0", "method": "VideoLibrary.Scan", "id": 1}
+            response = requests.post(
+                f"{kodi_host}/jsonrpc",
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                auth=(kodi_username, kodi_password) if kodi_username and kodi_password else None,
+                timeout=30
+            )
+            response.raise_for_status()
+            result = response.json()
+            if result.get("result") == "OK":
+                return jsonify({"success": True, "message": "Video library update started successfully"})
+            return jsonify({"success": False, "message": f"Unexpected response: {result}"})
+        except requests.Timeout:
             return jsonify({"success": False, "message": "Request timed out"})
+        except requests.RequestException as e:
+            return jsonify({"success": False, "message": f"Request error: {str(e)}"})
         except Exception as e:
             return jsonify({"success": False, "message": f"Error: {str(e)}"})
     
@@ -1510,37 +1496,23 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
     def update_audio_library():
         """Update audio library using Kodi JSON-RPC"""
         try:
-            import subprocess
-            
-            # Build curl command for audio library scan
-            curl_cmd = [
-                'curl', '-X', 'POST',
-                '-H', 'Content-Type: application/json',
-                '-d', '{"jsonrpc": "2.0", "method": "AudioLibrary.Scan", "id": 1}'
-            ]
-            
-            # Add authentication if provided
-            if kodi_username and kodi_password:
-                # kodi_host already includes http://, so we need to insert auth
-                auth_url = kodi_host.replace('http://', f'http://{kodi_username}:{kodi_password}@')
-                curl_cmd.append(f'{auth_url}/jsonrpc')
-            else:
-                curl_cmd.append(f'{kodi_host}/jsonrpc')
-            
-            # Execute curl command
-            result = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=30)
-            
-            if result.returncode == 0:
-                # Check if response contains "OK"
-                if '"result":"OK"' in result.stdout:
-                    return jsonify({"success": True, "message": "Audio library update started successfully"})
-                else:
-                    return jsonify({"success": False, "message": f"Unexpected response: {result.stdout}"})
-            else:
-                return jsonify({"success": False, "message": f"Error: {result.stderr}"})
-                
-        except subprocess.TimeoutExpired:
+            payload = {"jsonrpc": "2.0", "method": "AudioLibrary.Scan", "id": 1}
+            response = requests.post(
+                f"{kodi_host}/jsonrpc",
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                auth=(kodi_username, kodi_password) if kodi_username and kodi_password else None,
+                timeout=30
+            )
+            response.raise_for_status()
+            result = response.json()
+            if result.get("result") == "OK":
+                return jsonify({"success": True, "message": "Audio library update started successfully"})
+            return jsonify({"success": False, "message": f"Unexpected response: {result}"})
+        except requests.Timeout:
             return jsonify({"success": False, "message": "Request timed out"})
+        except requests.RequestException as e:
+            return jsonify({"success": False, "message": f"Request error: {str(e)}"})
         except Exception as e:
             return jsonify({"success": False, "message": f"Error: {str(e)}"})
     
@@ -1548,37 +1520,23 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
     def clean_video_library():
         """Clean video library using Kodi JSON-RPC"""
         try:
-            import subprocess
-            
-            # Build curl command for video library clean
-            curl_cmd = [
-                'curl', '-X', 'POST',
-                '-H', 'Content-Type: application/json',
-                '-d', '{"jsonrpc": "2.0", "method": "VideoLibrary.Clean", "id": 1}'
-            ]
-            
-            # Add authentication if provided
-            if kodi_username and kodi_password:
-                # kodi_host already includes http://, so we need to insert auth
-                auth_url = kodi_host.replace('http://', f'http://{kodi_username}:{kodi_password}@')
-                curl_cmd.append(f'{auth_url}/jsonrpc')
-            else:
-                curl_cmd.append(f'{kodi_host}/jsonrpc')
-            
-            # Execute curl command
-            result = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=30)
-            
-            if result.returncode == 0:
-                # Check if response contains "OK"
-                if '"result":"OK"' in result.stdout:
-                    return jsonify({"success": True, "message": "Video library clean started successfully"})
-                else:
-                    return jsonify({"success": False, "message": f"Unexpected response: {result.stdout}"})
-            else:
-                return jsonify({"success": False, "message": f"Error: {result.stderr}"})
-                
-        except subprocess.TimeoutExpired:
+            payload = {"jsonrpc": "2.0", "method": "VideoLibrary.Clean", "id": 1}
+            response = requests.post(
+                f"{kodi_host}/jsonrpc",
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                auth=(kodi_username, kodi_password) if kodi_username and kodi_password else None,
+                timeout=30
+            )
+            response.raise_for_status()
+            result = response.json()
+            if result.get("result") == "OK":
+                return jsonify({"success": True, "message": "Video library clean started successfully"})
+            return jsonify({"success": False, "message": f"Unexpected response: {result}"})
+        except requests.Timeout:
             return jsonify({"success": False, "message": "Request timed out"})
+        except requests.RequestException as e:
+            return jsonify({"success": False, "message": f"Request error: {str(e)}"})
         except Exception as e:
             return jsonify({"success": False, "message": f"Error: {str(e)}"})
     
@@ -1586,37 +1544,23 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
     def clean_music_library():
         """Clean music library using Kodi JSON-RPC"""
         try:
-            import subprocess
-            
-            # Build curl command for audio library clean
-            curl_cmd = [
-                'curl', '-X', 'POST',
-                '-H', 'Content-Type: application/json',
-                '-d', '{"jsonrpc": "2.0", "method": "AudioLibrary.Clean", "id": 1}'
-            ]
-            
-            # Add authentication if provided
-            if kodi_username and kodi_password:
-                # kodi_host already includes http://, so we need to insert auth
-                auth_url = kodi_host.replace('http://', f'http://{kodi_username}:{kodi_password}@')
-                curl_cmd.append(f'{auth_url}/jsonrpc')
-            else:
-                curl_cmd.append(f'{kodi_host}/jsonrpc')
-            
-            # Execute curl command
-            result = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=30)
-            
-            if result.returncode == 0:
-                # Check if response contains "OK"
-                if '"result":"OK"' in result.stdout:
-                    return jsonify({"success": True, "message": "Music library clean started successfully"})
-                else:
-                    return jsonify({"success": False, "message": f"Unexpected response: {result.stdout}"})
-            else:
-                return jsonify({"success": False, "message": f"Error: {result.stderr}"})
-                
-        except subprocess.TimeoutExpired:
+            payload = {"jsonrpc": "2.0", "method": "AudioLibrary.Clean", "id": 1}
+            response = requests.post(
+                f"{kodi_host}/jsonrpc",
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                auth=(kodi_username, kodi_password) if kodi_username and kodi_password else None,
+                timeout=30
+            )
+            response.raise_for_status()
+            result = response.json()
+            if result.get("result") == "OK":
+                return jsonify({"success": True, "message": "Music library clean started successfully"})
+            return jsonify({"success": False, "message": f"Unexpected response: {result}"})
+        except requests.Timeout:
             return jsonify({"success": False, "message": "Request timed out"})
+        except requests.RequestException as e:
+            return jsonify({"success": False, "message": f"Request error: {str(e)}"})
         except Exception as e:
             return jsonify({"success": False, "message": f"Error: {str(e)}"})
     
