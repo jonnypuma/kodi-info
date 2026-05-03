@@ -10,7 +10,7 @@ A Python script that connects to a Kodi device via JSON-RPC to retrieve comprehe
 - **HTML Output**: Beautiful web interface perfect for Homarr iframe integration
 - **Docker Support**: Easy deployment with Docker and Docker Compose
 - **Web Server**: Built-in Flask web server for real-time statistics
-- **Auto-refresh**: Statistics automatically refresh every 5 minutes
+- **Auto-refresh**: Page automatically reloads every 24 hours
 - **Manual Refresh**: Click the refresh button to instantly reload statistics
 - **Library Update Buttons**: Update video and audio libraries directly from the web interface
 - **Library Clean Buttons**: Clean video and music libraries directly from the web interface
@@ -18,6 +18,8 @@ A Python script that connects to a Kodi device via JSON-RPC to retrieve comprehe
 - **Error Handling**: Robust connection and data handling
 - **Command Line Interface**: Easy configuration via command line arguments
 - **Artwork Zoom**: Click any movie cover, episode thumbnail, or album cover to open a large animated preview; click anywhere or press Escape to close
+- **Animated Loading Screen**: Loading page with animated LOADING text before content appears
+- **Real Progress Bar**: Backend-driven progress updates while data loads
 
 ## Prerequisites
 
@@ -100,10 +102,11 @@ The web interface provides a beautiful, responsive dashboard showing:
 - **TV Shows**: Total shows, episodes, watched episodes, and watch percentage  
 - **Music**: Total artists, albums, and songs
 - **Connection Info**: Kodi host and last update time
-- **Auto-refresh**: Updates every 5 minutes
+- **Auto-refresh**: Reloads every 24 hours
 - **Manual Refresh Button**: Click the refresh icon next to the buttons to instantly reload the page and fetch fresh statistics
 - **Library Update Buttons**: Update Video Library and Update Audio Library buttons to trigger Kodi library scans
 - **Library Clean Buttons**: Clean Video Library and Clean Music Library buttons to remove missing items from Kodi libraries
+- **Loading Screen**: Animated LOADING text with real-time progress while the page loads
 
 ### Console Output
 The script can output statistics directly to the console. Run the script without the `--web-server` flag:
