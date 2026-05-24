@@ -12,6 +12,7 @@ A Python script that connects to a Kodi device via JSON-RPC to retrieve comprehe
 - **Web Server**: Built-in Flask web server for real-time statistics
 - **Auto-refresh**: Page automatically reloads every 24 hours
 - **Manual Refresh**: Click the refresh button to instantly reload statistics
+- **Multiple Kodi servers**: Each defined **`KODI_HOST`** and **`KODI_HOST_1` … `_10`** is its **own** dropdown row—**no merging** (**`KODI_LABEL`** / **`KODI_LABEL_N`** for names); manual host/port on the starter screen — Scan/Clean use the connection you loaded last (signed session cookie)
 - **Library Update Buttons**: Update video and audio libraries directly from the web interface
 - **Library Clean Buttons**: Clean video and music libraries directly from the web interface
 - **JSON Export**: Save statistics to JSON file
@@ -36,15 +37,29 @@ A Python script that connects to a Kodi device via JSON-RPC to retrieve comprehe
 **IMPORTANT**: You must edit the supplied .env file or create a new `.env` file with your Kodi settings (no defaults provided):
 
 ```bash
-# Kodi Connection Settings (REQUIRED)
-KODI_HOST=http://ip_address:port
+# First dropdown row if set (`KODI_LABEL` optional; defaults to "Primary")
+KODI_HOST=http://192.168.1.50:8080
 KODI_USERNAME=your_kodi_http_user
 KODI_PASSWORD=your_kodi_http_password
+KODI_LABEL=Living room
+
+# Each non-empty `_N` adds another dropdown row (`KODI_LABEL_N` optional)
+# KODI_HOST_1=http://192.168.1.51:8080
+# KODI_USERNAME_1=
+# KODI_PASSWORD_1=
+# KODI_LABEL_1=Bedroom
+#
+# KODI_HOST_2=...
+
+# Web UI session signing (recommended for repeatable logins across container restarts)
+# WEB_SECRET_KEY=long-random-string
 
 # Web Server Settings
 WEB_PORT=5005
 
 ```
+
+When the app starts, opening `http://host:5005/` shows **saved servers** in a dropdown (from the variables above). Choose one and click **Load library**, or pick **Custom** and enter IP/hostname, port (default 8080), and optional credentials. **Switch Kodi server…** on the dashboard returns to that screen. Update/clean library actions always target the connection you last loaded (session).
 
 ### 2. Docker Commands
 
@@ -80,7 +95,7 @@ docker compose up -d --build
 ```
 
 ### 3. Access the Dashboard
-Open your browser to `http://localhost:5005` or use your container host's IP:5005. 
+Open your browser to `http://localhost:5005` or use your container host's IP:5005. Pick a preset or enter a custom JSON-RPC address, then **Load library**. `GET /api/servers` returns preset metadata (no passwords) for automation.
 
 
 ## Homarr Integration
@@ -170,6 +185,7 @@ python kodi_info.py --host http://192.168.1.10:555 --save-html --save-json
 - Check that JSON-RPC is enabled in Kodi settings
 - Ensure firewall allows connections to the specified port
 - Verify IP address and port are correct
+- If you use a **hostname** from inside Docker and lookups fail (rare LAN/DNS quirks), add `extra_hosts` in Compose to map that name to its IP—the default compose file omits `extra_hosts` because most setups resolve LAN IPs directly
 
 ### Authentication Issues
 - Check username/password if authentication is enabled

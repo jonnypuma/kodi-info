@@ -2,23 +2,40 @@ version: '3.8'
 
 services:
   kodi-info:
-    build: .
+    build: ./kodiinfo
     container_name: kodi-info
     image: kodi-info
     restart: unless-stopped
     ports:
       - "5005:5005"
     environment:
-      # Kodi connection settings
-      - KODI_HOST=${KODI_HOST}
-      - KODI_USERNAME=${KODI_USERNAME}
-      - KODI_PASSWORD=${KODI_PASSWORD}
+      # Each non-empty KODI_HOST then KODI_HOST_1…10 = one dropdown row (no merging).
+      - KODI_HOST=${KODI_HOST:-}
+      - KODI_USERNAME=${KODI_USERNAME:-}
+      - KODI_PASSWORD=${KODI_PASSWORD:-}
+      - KODI_LABEL=${KODI_LABEL:-}
+      - KODI_HOST_1=${KODI_HOST_1:-}
+      - KODI_USERNAME_1=${KODI_USERNAME_1:-}
+      - KODI_PASSWORD_1=${KODI_PASSWORD_1:-}
+      - KODI_LABEL_1=${KODI_LABEL_1:-}
+      - KODI_HOST_2=${KODI_HOST_2:-}
+      - KODI_USERNAME_2=${KODI_USERNAME_2:-}
+      - KODI_PASSWORD_2=${KODI_PASSWORD_2:-}
+      - KODI_LABEL_2=${KODI_LABEL_2:-}
+      - KODI_HOST_3=${KODI_HOST_3:-}
+      - KODI_USERNAME_3=${KODI_USERNAME_3:-}
+      - KODI_PASSWORD_3=${KODI_PASSWORD_3:-}
+      - KODI_LABEL_3=${KODI_LABEL_3:-}
+      # Same pattern for slots 4–10: KODI_HOST_4 … KODI_LABEL_4, etc.
+      # Signed session cookie used for Scan/Clean RPC (set in production stacks)
+      - WEB_SECRET_KEY=${WEB_SECRET_KEY:-}
       # Web server settings
       - WEB_PORT=5005
     env_file:
       - ./.env
-    extra_hosts:
-      - "192.168.0.120:192.168.0.120"
+    # Uncomment only if the container cannot resolve a LAN hostname and you must pin it:
+    # extra_hosts:
+    #   - "kodiLivingRoom:192.168.0.50"
     volumes:
       # Optional: Mount output directory for HTML files
       - ./output:/app/output
@@ -28,4 +45,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
-
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -18,22 +18,25 @@ Usage:
 
 import argparse
 import json
+import logging
+import secrets
 import sys
 import os
 import time
 import threading
 import uuid
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from urllib.parse import urlparse
 
 try:
     import requests
-    from flask import Flask, send_file, render_template_string, request, jsonify
+    from flask import Flask, send_file, request, jsonify, session
 except ImportError:
     print("Error: Required packages not found. Please install with: pip install -r requirements.txt")
     sys.exit(1)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -83,17 +86,42 @@ class KodiLibraryProbe:
             password: Kodi password (optional)
         """
         # Parse host - if it's a URL, extract host and port
-        if host.startswith('http://') or host.startswith('https://'):
+        if host.startswith("http://") or host.startswith("https://"):
             from urllib.parse import urlparse
+
             parsed = urlparse(host)
             self.host = parsed.hostname
-            self.port = parsed.port or (8080 if parsed.scheme == 'http' else 443)
+            self.port = parsed.port or (8080 if parsed.scheme == "http" else 443)
             self.scheme = parsed.scheme
         else:
-            self.host = host
-            self.port = port or 8080
-            self.scheme = 'http'
-        
+            # Bare hostname or IPv4 — may embed :port (common in env: "192.168.1.5:9090").
+            explicit_port = port
+            raw = host.strip()
+            embedded_port: Optional[int] = None
+            h = raw
+            if raw.startswith("[") and "]:" in raw:
+                bracket_end = raw.rfind("]:")
+                port_bit = raw[bracket_end + 2 :]
+                if port_bit.isdigit():
+                    embedded_port = int(port_bit)
+                    h = raw[1:bracket_end]
+            elif ":" in raw:
+                cand, suf = raw.rsplit(":", 1)
+                if cand and suf.isdigit():
+                    h = cand.strip()
+                    embedded_port = int(suf)
+            self.host = h or raw
+            self.scheme = "http"
+            self.port = (
+                explicit_port
+                if explicit_port is not None
+                else (
+                    embedded_port
+                    if embedded_port is not None
+                    else 8080
+                )
+            )
+
         # Ensure we're using IP address directly (no DNS resolution)
 # Debug logging removed for security
         
@@ -207,32 +235,53 @@ class KodiLibraryProbe:
                 "limits": {"start": 0, "end": 100000}
             })
             total_tv_shows = tv_shows_result.get("result", {}).get("limits", {}).get("total", 0)
-            
-            # Try to use VideoLibrary.GetStatistics first (much faster)
-            try:
-                stats_result = self._make_request("VideoLibrary.GetStatistics", {}, timeout=30)
-                if stats_result and "result" in stats_result:
-                    stats = stats_result["result"].get("statistics", {})
-                    total_episodes = stats.get("episode", 0)
-                    watched_episodes = stats.get("episode.watched", 0)
-                    print(f"📊 Using GetStatistics: {total_episodes} episodes, {watched_episodes} watched")
-                else:
-                    raise Exception("GetStatistics failed")
-            except:
-                print("📺 GetStatistics failed, falling back to GetEpisodes...")
-                # Fallback: Get episodes with playcount (use longer timeout for large datasets)
-                episodes_result = self._make_request("VideoLibrary.GetEpisodes", {
-                    "properties": ["playcount"],
-                    "limits": {"start": 0, "end": 100000}
-                }, timeout=120)
-                
+
+            # Global library episode count (matches JSON-RPC catalog; may differ from Kodi UI/DB — Kodi-side).
+            ep_quick = self._make_request(
+                "VideoLibrary.GetEpisodes",
+                {"limits": {"start": 0, "end": 1}},
+                timeout=60,
+            )
+            total_episodes = int(
+                (ep_quick.get("result") or {}).get("limits", {}).get("total") or 0
+            )
+
+            watched_episodes = 0
+            stats_result = self._make_request("VideoLibrary.GetStatistics", {}, timeout=30)
+            if stats_result and "result" in stats_result:
+                statistics = stats_result["result"].get("statistics", {})
+                watched_episodes = int(statistics.get("episode.watched", 0) or 0)
+                if total_episodes <= 0:
+                    total_episodes = int(statistics.get("episode", 0) or 0)
+                print(f"📺 Global episodes: {total_episodes}; watched (GetStatistics): {watched_episodes}")
+            elif total_episodes > 0:
+                print("📺 GetStatistics missing — paginating playcounts for watched…")
+                watched_episodes, scan_total = _watched_episodes_paginated(self)
+                if total_episodes <= 0 and scan_total > 0:
+                    total_episodes = scan_total
+            else:
+                episodes_result = self._make_request(
+                    "VideoLibrary.GetEpisodes",
+                    {
+                        "properties": ["playcount"],
+                        "limits": {"start": 0, "end": 100000},
+                    },
+                    timeout=120,
+                )
                 episodes = episodes_result.get("result", {}).get("episodes", [])
                 total_episodes = episodes_result.get("result", {}).get("limits", {}).get("total", 0)
-                watched_episodes = sum(1 for episode in episodes 
-                                     if episode.get("playcount", 0) > 0)
-            
+                watched_episodes = sum(
+                    1 for episode in episodes if episode.get("playcount", 0) > 0
+                )
+                print(f"📺 Fallback GetEpisodes batch: total={total_episodes} watched={watched_episodes}")
+
+            if total_episodes > 0 and watched_episodes > total_episodes:
+                watched_episodes = total_episodes
+
+            print(f"📺 Shows: {total_tv_shows}")
+
             return total_tv_shows, total_episodes, watched_episodes
-            
+
         except Exception as e:
             print(f"  ⚠️  Error fetching TV statistics: {str(e)}")
             return 0, 0, 0
@@ -330,8 +379,60 @@ class KodiLibraryProbe:
         
         # Get recently added content
         stats.recently_added = self.get_recently_added_content()
-        
+
         return stats
+
+
+def _watched_episodes_paginated(
+    probe: KodiLibraryProbe,
+    page_size: int = 2500,
+    on_progress: Optional[Callable[[int, int], None]] = None,
+) -> tuple[int, int]:
+    """
+    Count watched by scanning playcount in pages (GetEpisodes can truncate large lists).
+    Returns (watched_count, global_total_from_first_response).
+    """
+    watched = 0
+    global_total: Optional[int] = None
+    start = 0
+    page_size = max(250, page_size)
+
+    while True:
+        episodes_result = probe._make_request(
+            "VideoLibrary.GetEpisodes",
+            {
+                "properties": ["playcount"],
+                "limits": {"start": start, "end": start + page_size},
+            },
+            timeout=180,
+        )
+        res_block = episodes_result.get("result") or {}
+        batch = res_block.get("episodes") or []
+        if global_total is None:
+            global_total = int((res_block.get("limits") or {}).get("total") or 0)
+
+        for ep in batch:
+            if ep.get("playcount", 0) > 0:
+                watched += 1
+
+        if not batch:
+            break
+        start += len(batch)
+        if (
+            on_progress is not None
+            and global_total is not None
+            and global_total > 0
+        ):
+            try:
+                on_progress(min(start, global_total), global_total)
+            except Exception:
+                pass
+        if global_total is not None and global_total > 0 and start >= global_total:
+            break
+        if len(batch) < page_size:
+            break
+
+    return watched, global_total if global_total is not None else start
 
 
 def format_recent_item(item, item_type, kodi_host=None, probe=None):
@@ -455,17 +556,21 @@ def format_recent_item(item, item_type, kodi_host=None, probe=None):
         }
     return {}
 
-def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=None, show_loading_overlay: bool = True) -> str:
+def generate_html(stats: LibraryStats, kodi_display: str, last_updated: str, probe=None, show_loading_overlay: bool = True) -> str:
     """Generate HTML output for Homarr iframe integration"""
-    
+
+    artwork_base_url = kodi_display
+    if probe is not None:
+        artwork_base_url = f"{probe.scheme}://{probe.host}:{probe.port}"
+
     # Calculate percentages
     movie_watch_percentage = (stats.watched_movies / stats.total_movies * 100) if stats.total_movies > 0 else 0
     episode_watch_percentage = (stats.watched_episodes / stats.total_episodes * 100) if stats.total_episodes > 0 else 0
     
     # Format recently added items
-    recent_movies = [format_recent_item(movie, 'movie', kodi_host, probe) for movie in stats.recently_added.movies]
-    recent_episodes = [format_recent_item(episode, 'episode', kodi_host, probe) for episode in stats.recently_added.episodes]
-    recent_albums = [format_recent_item(album, 'album', kodi_host, probe) for album in stats.recently_added.albums]
+    recent_movies = [format_recent_item(movie, 'movie', artwork_base_url, probe) for movie in stats.recently_added.movies]
+    recent_episodes = [format_recent_item(episode, 'episode', artwork_base_url, probe) for episode in stats.recently_added.episodes]
+    recent_albums = [format_recent_item(album, 'album', artwork_base_url, probe) for album in stats.recently_added.albums]
     
     # Generate HTML for recently added items
     def generate_recent_items_html(items, content_type):
@@ -644,6 +749,31 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
         .btn {{ background: #007bff; color: white; border: none; padding: 10px 20px; margin: 0 10px; border-radius: 5px; cursor: pointer; min-width: 190px; display: inline-flex; align-items: center; justify-content: center; }}
         .btn:hover {{ background: #0056b3; }}
         .btn:disabled {{ background: #6c757d; cursor: not-allowed; }}
+        .action-status {{
+            display: none;
+            margin-top: 14px;
+            margin-bottom: 4px;
+            padding: 12px 14px;
+            border-radius: 8px;
+            font-size: 0.92em;
+            white-space: pre-wrap;
+            word-break: break-word;
+            text-align: left;
+            max-height: 240px;
+            overflow-y: auto;
+            color: rgba(255, 255, 255, 0.95);
+        }}
+        .action-status.visible {{
+            display: block;
+        }}
+        .action-status.ok {{
+            background: rgba(40, 167, 69, 0.28);
+            border: 1px solid rgba(40, 167, 69, 0.55);
+        }}
+        .action-status.err {{
+            background: rgba(220, 53, 69, 0.28);
+            border: 1px solid rgba(220, 53, 69, 0.55);
+        }}
         /* Image overlay for zoomed artwork */
         .image-overlay {{
             position: fixed;
@@ -656,6 +786,7 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
             pointer-events: none;
             transition: opacity 0.25s ease;
             z-index: 9999;
+            overflow: hidden;
         }}
         .image-overlay.visible {{
             opacity: 1;
@@ -668,9 +799,14 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.8);
             transform: scale(0.25);
             transition: transform 0.25s ease;
+            object-fit: contain;
         }}
         .image-overlay.visible img {{
             transform: scale(1);
+        }}
+        /* Episode thumbnails: double drawn size vs poster/album overlay (handles low-res Kodi thumbs) */
+        .image-overlay.visible.episode-zoom img {{
+            transform: scale(2);
         }}
         .zoomable {{
             cursor: zoom-in;
@@ -756,7 +892,8 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
         <div class="header">
             <img src="/kodi.png" alt="Kodi Logo" style="height: 120px; margin-bottom: 10px;">
             <h1>Library Statistics</h1>
-            <p>Connected to: {kodi_host}</p>
+            <p>Connected to: {kodi_display}</p>
+            <p style="margin-top: -6px;"><a href="/" style="color: #90caf9;">Switch Kodi server…</a></p>
             <p>Last updated: {last_updated}</p>
         </div>
         
@@ -765,8 +902,9 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
             <button id="update-audio-btn" class="btn" onclick="updateLibrary('audio')">Update Audio Library</button>
             <button id="clean-video-btn" class="btn" onclick="cleanLibrary('video')">Clean Video Library</button>
             <button id="clean-music-btn" class="btn" onclick="cleanLibrary('music')">Clean Music Library</button>
-            <img src="/refresh.png" alt="Refresh" onclick="location.reload()" style="width: 40px; height: 40px; margin-left: 10px; cursor: pointer; vertical-align: middle;" title="Refresh page">
+            <img src="/refresh.png" alt="Refresh" onclick="window.location.href='/session-reload'" style="width: 40px; height: 40px; margin-left: 10px; cursor: pointer; vertical-align: middle;" title="Refresh library (same server)">
         </div>
+        <div id="library-action-status" class="action-status" role="status" aria-live="polite" aria-atomic="true" hidden></div>
         
         <div class="stats">
             <div class="stat-column">
@@ -843,70 +981,115 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
     <script>
         __LOADING_SCRIPT__
 
+        const LIB_BTN_RESET_OK_MS = 4000;
+        const LIB_BTN_RESET_ERR_MS = 12000;
+
+        function showLibraryActionStatus(level, summary, detail) {{
+            const box = document.getElementById('library-action-status');
+            if (!box) return;
+            const ts = '[' + new Date().toLocaleTimeString() + '] ';
+            box.hidden = false;
+            box.textContent = ts + summary + (detail ? ('\\n' + detail) : '');
+            box.className = 'action-status visible ' + (level === 'ok' ? 'ok' : 'err');
+        }}
+
+        function clearLibraryActionStatus() {{
+            const box = document.getElementById('library-action-status');
+            if (!box) return;
+            box.hidden = true;
+            box.textContent = '';
+            box.className = 'action-status';
+        }}
+
+        function scheduleButtonReset(button, label, ms) {{
+            window.setTimeout(() => {{
+                button.disabled = false;
+                button.textContent = label;
+                button.style.background = '';
+            }}, ms);
+        }}
+
+        function fetchLibraryActionJson(url) {{
+            return fetch(url, {{ method: 'POST' }}).then(async (response) => {{
+                const text = await response.text();
+                let data = {{}};
+                if (text) {{
+                    try {{
+                        data = JSON.parse(text);
+                    }} catch (e) {{
+                        throw new Error('Invalid JSON (HTTP ' + response.status + '): ' + text.slice(0, 600));
+                    }}
+                }}
+                if (!response.ok) {{
+                    const msg = (data && data.message) ? String(data.message) : ('HTTP ' + response.status);
+                    throw new Error(msg);
+                }}
+                return data;
+            }});
+        }}
+
         function updateLibrary(type) {{
+            clearLibraryActionStatus();
+            const label = type === 'video' ? 'Update Video Library' : 'Update Audio Library';
             const button = document.getElementById('update-' + type + '-btn');
             button.disabled = true;
             button.textContent = 'Updating...';
-            
-            fetch('/update-' + type + '-library', {{method: 'POST'}})
-                .then(response => response.json())
-                .then(data => {{
+
+            fetchLibraryActionJson('/update-' + type + '-library')
+                .then((data) => {{
                     if (data.success) {{
                         button.textContent = 'Success!';
                         button.style.background = '#28a745';
+                        showLibraryActionStatus('ok', label + ' succeeded', data.message || '');
+                        scheduleButtonReset(button, label, LIB_BTN_RESET_OK_MS);
                     }} else {{
-                        button.textContent = 'Error: ' + data.message;
+                        const msg = data.message ? String(data.message) : 'Unknown error';
+                        button.textContent = 'Failed — details below';
                         button.style.background = '#dc3545';
+                        showLibraryActionStatus('err', label + ' failed', msg);
+                        scheduleButtonReset(button, label, LIB_BTN_RESET_ERR_MS);
                     }}
-                    
-                    setTimeout(() => {{
-                        button.disabled = false;
-                        button.textContent = type === 'video' ? 'Update Video Library' : 'Update Audio Library';
-                        button.style.background = '';
-                    }}, 5000);
                 }})
-                .catch(error => {{
-                    button.textContent = 'Error';
+                .catch((error) => {{
+                    const msg = (error && error.message) ? String(error.message) : String(error);
+                    button.textContent = 'Failed — details below';
                     button.style.background = '#dc3545';
-                    setTimeout(() => {{
-                        button.disabled = false;
-                        button.textContent = type === 'video' ? 'Update Video Library' : 'Update Audio Library';
-                        button.style.background = '';
-                    }}, 5000);
+                    showLibraryActionStatus('err', label + ' failed', msg);
+                    console.error('updateLibrary:', error);
+                    scheduleButtonReset(button, label, LIB_BTN_RESET_ERR_MS);
                 }});
         }}
-        
+
         function cleanLibrary(type) {{
+            clearLibraryActionStatus();
+            const label = type === 'video' ? 'Clean Video Library' : 'Clean Music Library';
             const button = document.getElementById('clean-' + type + '-btn');
             button.disabled = true;
             button.textContent = 'Cleaning...';
-            
+
             const endpoint = type === 'video' ? '/clean-video-library' : '/clean-music-library';
-            fetch(endpoint, {{method: 'POST'}})
-                .then(response => response.json())
-                .then(data => {{
+            fetchLibraryActionJson(endpoint)
+                .then((data) => {{
                     if (data.success) {{
                         button.textContent = 'Success!';
                         button.style.background = '#28a745';
+                        showLibraryActionStatus('ok', label + ' succeeded', data.message || '');
+                        scheduleButtonReset(button, label, LIB_BTN_RESET_OK_MS);
                     }} else {{
-                        button.textContent = 'Error: ' + data.message;
+                        const msg = data.message ? String(data.message) : 'Unknown error';
+                        button.textContent = 'Failed — details below';
                         button.style.background = '#dc3545';
+                        showLibraryActionStatus('err', label + ' failed', msg);
+                        scheduleButtonReset(button, label, LIB_BTN_RESET_ERR_MS);
                     }}
-                    
-                    setTimeout(() => {{
-                        button.disabled = false;
-                        button.textContent = type === 'video' ? 'Clean Video Library' : 'Clean Music Library';
-                        button.style.background = '';
-                    }}, 5000);
                 }})
-                .catch(error => {{
-                    button.textContent = 'Error';
+                .catch((error) => {{
+                    const msg = (error && error.message) ? String(error.message) : String(error);
+                    button.textContent = 'Failed — details below';
                     button.style.background = '#dc3545';
-                    setTimeout(() => {{
-                        button.disabled = false;
-                        button.textContent = type === 'video' ? 'Clean Video Library' : 'Clean Music Library';
-                        button.style.background = '';
-                    }}, 5000);
+                    showLibraryActionStatus('err', label + ' failed', msg);
+                    console.error('cleanLibrary:', error);
+                    scheduleButtonReset(button, label, LIB_BTN_RESET_ERR_MS);
                 }});
         }}
         
@@ -916,7 +1099,7 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
             // Set up 24-hour refresh cycle
             setTimeout(() => {{
                 console.log('Auto-reloading page after 24 hours...');
-                window.location.reload();
+                window.location.href = '/session-reload';
             }}, 24 * 60 * 60 * 1000);
             
             // Show next reload time in console for debugging
@@ -932,6 +1115,7 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
                 img.classList.add('zoomable');
                 img.addEventListener('click', event => {{
                     event.stopPropagation();
+                    overlay.classList.toggle('episode-zoom', img.classList.contains('episode-thumb'));
                     overlayImg.src = img.src;
                     overlay.classList.add('visible');
                 }});
@@ -940,6 +1124,7 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
             // Close overlay on any click
             overlay.addEventListener('click', () => {{
                 overlay.classList.remove('visible');
+                overlay.classList.remove('episode-zoom');
                 overlayImg.src = '';
             }});
 
@@ -947,6 +1132,7 @@ def generate_html(stats: LibraryStats, kodi_host: str, last_updated: str, probe=
             document.addEventListener('keydown', event => {{
                 if (event.key === 'Escape' && overlay.classList.contains('visible')) {{
                     overlay.classList.remove('visible');
+                    overlay.classList.remove('episode-zoom');
                     overlayImg.src = '';
                 }}
             }});
@@ -1028,27 +1214,262 @@ def save_statistics_to_json(stats: LibraryStats, filename: str = "kodi_library_s
     except Exception as e:
         print(f"⚠️  Error saving to file: {str(e)}")
 
+
+def collect_preset_kodi_servers() -> List[Dict[str, str]]:
+    """
+    Each non-empty Kodi target is its own preset (dropdown row). No merging.
+
+    Order: ``KODI_HOST`` (+ unnumbered username/password + ``KODI_LABEL``), then
+    ``KODI_HOST_1`` … ``KODI_HOST_10`` with matching ``*_N`` creds and labels.
+
+    Preset IDs are sequential ``"1"``, ``"2"``, … in that order (not the env suffix `_N`).
+    """
+    raw_slots: List[Dict[str, str]] = []
+
+    legacy_host = (os.getenv("KODI_HOST") or "").strip()
+    if legacy_host:
+        lbl = (os.getenv("KODI_LABEL") or "").strip()
+        raw_slots.append(
+            {
+                "host": legacy_host,
+                "username": (os.getenv("KODI_USERNAME") or "").strip(),
+                "password": (os.getenv("KODI_PASSWORD") or "").strip(),
+                "label": lbl if lbl else "Primary",
+            }
+        )
+
+    for i in range(1, 11):
+        h = (os.getenv(f"KODI_HOST_{i}") or "").strip()
+        if not h:
+            continue
+        lbl = (os.getenv(f"KODI_LABEL_{i}") or "").strip()
+        raw_slots.append(
+            {
+                "host": h,
+                "username": (os.getenv(f"KODI_USERNAME_{i}") or "").strip(),
+                "password": (os.getenv(f"KODI_PASSWORD_{i}") or "").strip(),
+                "label": lbl if lbl else f"Server {i}",
+            }
+        )
+
+    out: List[Dict[str, str]] = []
+    for idx, row in enumerate(raw_slots, start=1):
+        out.append(
+            {
+                "id": str(idx),
+                "label": row["label"],
+                "host": row["host"],
+                "username": row["username"],
+                "password": row["password"],
+            }
+        )
+    return out
+
+
+def _normalize_manual_url(host: str, port: Any, scheme: str = "http") -> Tuple[Optional[str], Optional[str]]:
+    host = (host or "").strip()
+    if not host:
+        return None, "Host / IP is required"
+    try:
+        port_int = int(port)
+    except (TypeError, ValueError):
+        return None, "Port must be a number"
+    if port_int < 1 or port_int > 65535:
+        return None, "Port must be between 1 and 65535"
+    sch = (scheme or "http").strip().lower()
+    if sch not in ("http", "https"):
+        sch = "http"
+    url = f"{sch}://{host}:{port_int}"
+    return url, None
+
+
+def connection_dict_for_preset(slot: Dict[str, str]) -> Dict[str, Any]:
+    return {
+        "host": slot["host"],
+        "username": slot.get("username") or "",
+        "password": slot.get("password") or "",
+        "label": slot.get("label") or f"Server {slot.get('id', '')}",
+        "preset_id": slot.get("id"),
+    }
+
+
+def resolve_start_load_connection(
+    data: Optional[Dict[str, Any]], presets: List[Dict[str, str]]
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Build a connection dict from JSON body or return an error message.
+    """
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        return None, "Invalid JSON body"
+
+    if data.get("use_session") is True:
+        sc = session.get("kodi_connection")
+        if isinstance(sc, dict) and (sc.get("host") or "").strip():
+            return dict(sc), None
+        return None, "Session has no Kodi connection — open the home page and pick a server."
+
+    preset_hint = data.get("preset") or data.get("server_id") or data.get("id")
+    is_custom = bool(data.get("custom")) or str(preset_hint or "").strip().lower() in (
+        "custom",
+        "manual",
+    )
+
+    if is_custom:
+        url, err = _normalize_manual_url(
+            data.get("host", ""),
+            data.get("port", 8080),
+            data.get("scheme", "http"),
+        )
+        if err or not url:
+            return None, err or "Invalid address"
+        custom_label = (data.get("label") or "").strip()
+        lbl = custom_label if custom_label else f"Custom ({data.get('host', '').strip()})"
+        return (
+            {
+                "host": url,
+                "username": (data.get("username") or "") or "",
+                "password": (data.get("password") or "") or "",
+                "label": lbl,
+                "preset_id": None,
+            },
+            None,
+        )
+
+    sid = str(preset_hint).strip() if preset_hint is not None else ""
+
+    chosen: Optional[Dict[str, str]] = None
+    if sid.isdigit():
+        for p in presets:
+            if p["id"] == sid:
+                chosen = p
+                break
+
+    # When no preset id given, default to first preset in list order
+    if chosen is None and not sid and presets:
+        chosen = presets[0]
+
+    if chosen is None:
+        return None, "Select a configured server or use custom host/port"
+
+    return connection_dict_for_preset(chosen), None
+
+
+def default_connection_for_get(presets: List[Dict[str, str]]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Backward-compatible GET /start-load: first configured preset."""
+    if not presets:
+        return None, "No preset Kodi servers in environment. Use the form to enter host and port."
+    return connection_dict_for_preset(presets[0]), None
+
+
 def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
     """Create Flask web server to serve HTML statistics"""
     app = Flask(__name__)
+    app.secret_key = os.getenv("WEB_SECRET_KEY") or secrets.token_hex(32)
     load_jobs = {}
     load_lock = threading.Lock()
-    
-    # Get Kodi connection details from environment variables - optionally input youur credenctials as fallcack below
-    kodi_host = os.getenv("KODI_HOST", "http://192.168.1.10:555")
-    kodi_username = os.getenv("KODI_USERNAME", "user")
-    kodi_password = os.getenv("KODI_PASSWORD", "pass")
-    
-# Debug logging removed for security
-    def build_content_html(stats: LibraryStats, last_updated: str, show_loading_overlay: bool = True):
-        # Create probe instance
-# Debug logging removed for security
-        # Generate HTML (page is already refreshed automatically on startup)
-        probe = KodiLibraryProbe(kodi_host, None, kodi_username, kodi_password)
-        html_content = generate_html(stats, kodi_host, last_updated, probe, show_loading_overlay=show_loading_overlay)
+
+    preset_servers = collect_preset_kodi_servers()
+    presets_json_list = [{"id": p["id"], "label": p["label"], "host": p["host"]} for p in preset_servers]
+    presets_json = json.dumps(presets_json_list)
+
+    if not logger.handlers:
+        _h = logging.StreamHandler(sys.stderr)
+        _h.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%Y-%m-%dT%H:%M:%S")
+        )
+        logger.addHandler(_h)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+
+    def _get_session_connection() -> Optional[Dict[str, Any]]:
+        conn = session.get("kodi_connection")
+        return conn if isinstance(conn, dict) and conn.get("host") else None
+
+    def _run_kodi_rpc(method: str, conn: Optional[Dict[str, Any]] = None) -> tuple[bool, str]:
+        """POST JSON-RPC to Kodi using the same endpoint resolution as KodiLibraryProbe."""
+        active = conn or _get_session_connection()
+        if not active or not active.get("host"):
+            return False, "No Kodi connection selected — open the homepage and choose a server"
+        probe = KodiLibraryProbe(
+            active["host"], None, active.get("username") or "", active.get("password") or ""
+        )
+        endpoint = probe.base_url
+        payload = {"jsonrpc": "2.0", "method": method, "id": 1}
+        response_obj = None
+        try:
+            response_obj = requests.post(
+                endpoint,
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                auth=probe.auth,
+                timeout=30,
+            )
+            response_obj.raise_for_status()
+            body = response_obj.json()
+        except requests.Timeout:
+            logger.error("Kodi JSON-RPC timed out method=%s endpoint=%s", method, endpoint)
+            return False, "Request timed out"
+        except requests.RequestException as e:
+            logger.error(
+                "Kodi JSON-RPC request failed method=%s endpoint=%s: %s",
+                method,
+                endpoint,
+                e,
+                exc_info=True,
+            )
+            return False, f"Request error: {str(e)}"
+        except ValueError:
+            snippet = (response_obj.text or "")[:500] if response_obj is not None else ""
+            logger.error(
+                "Invalid JSON from Kodi method=%s endpoint=%s snippet=%s",
+                method,
+                endpoint,
+                snippet,
+                exc_info=True,
+            )
+            return False, "Invalid response from Kodi (not JSON)"
+        except Exception as e:
+            logger.exception("Unexpected error calling Kodi method=%s endpoint=%s", method, endpoint)
+            return False, f"Error: {str(e)}"
+
+        rpc_err = body.get("error")
+        if rpc_err:
+            logger.warning("Kodi JSON-RPC error method=%s endpoint=%s error=%s", method, endpoint, rpc_err)
+            return False, f"Kodi error: {rpc_err}"
+
+        if body.get("result") == "OK":
+            logger.info("Kodi JSON-RPC OK method=%s endpoint=%s", method, endpoint)
+            return True, ""
+
+        logger.warning("Kodi unexpected response method=%s endpoint=%s body=%s", method, endpoint, body)
+        return False, f"Unexpected response: {body}"
+
+    def build_content_html(
+        stats: LibraryStats,
+        last_updated: str,
+        conn: Dict[str, Any],
+        show_loading_overlay: bool = True,
+    ):
+        host_display = conn.get("host", "")
+        label = conn.get("label") or host_display
+        kodi_display = f"{label} — {host_display}" if label and label != host_display else host_display
+
+        probe = KodiLibraryProbe(
+            conn["host"], None, conn.get("username") or "", conn.get("password") or ""
+        )
+        html_content = generate_html(
+            stats,
+            kodi_display,
+            last_updated,
+            probe,
+            show_loading_overlay=show_loading_overlay,
+        )
         return html_content
 
-    def generate_loading_html():
+    def generate_loading_html(reload_from_session: bool = False):
+        reload_lit = "true" if reload_from_session else "false"
         return f"""
 <!DOCTYPE html>
 <html>
@@ -1061,7 +1482,7 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
             background-color: #141414;
             padding: 0;
             margin: 0;
-            height: 100vh;
+            min-height: 100vh;
             width: 100vw;
             display: flex;
             align-items: center;
@@ -1073,6 +1494,72 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
         @keyframes fadeIn {{
             from {{ opacity: 0; }}
             to {{ opacity: 1; }}
+        }}
+        .panel {{
+            max-width: 520px;
+            width: 92%;
+            color: #fff;
+            text-align: center;
+        }}
+        .server-form {{
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 14px;
+            padding: 16px;
+            margin-bottom: 22px;
+            text-align: left;
+        }}
+        .server-form label {{
+            display: block;
+            font-size: 0.75em;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: rgba(255,255,255,0.7);
+            margin: 10px 0 4px;
+        }}
+        .server-form select, .server-form input {{
+            width: 100%;
+            box-sizing: border-box;
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid rgba(255,255,255,0.22);
+            background: rgba(0,0,0,0.35);
+            color: #fff;
+            font-family: Arial, sans-serif;
+            font-size: 14px;
+        }}
+        .row2 {{
+            display: grid;
+            grid-template-columns: 1fr 120px;
+            gap: 10px;
+            align-items: end;
+        }}
+        .form-actions {{
+            margin-top: 14px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }}
+        .btn {{
+            flex: 1;
+            min-width: 120px;
+            padding: 10px 14px;
+            border-radius: 8px;
+            border: none;
+            cursor: pointer;
+            font-weight: 700;
+            font-size: 14px;
+        }}
+        .btn-primary {{
+            background: #2196f3;
+            color: #fff;
+        }}
+        .btn-primary:hover {{
+            background: #1976d2;
+        }}
+        .btn-muted {{
+            background: rgba(255,255,255,0.14);
+            color: #fff;
         }}
         .loader {{
             -webkit-perspective: 700px;
@@ -1102,7 +1589,8 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
         .loader > span:nth-child(6) {{ animation-delay: 1.5s; }}
         .loader > span:nth-child(7) {{ animation-delay: 1.8s; }}
         .loading-bar {{
-            width: 320px;
+            width: 100%;
+            max-width: 320px;
             height: 10px;
             background: rgba(255, 255, 255, 0.18);
             border-radius: 999px;
@@ -1122,26 +1610,81 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
             letter-spacing: 0.5px;
             text-align: center;
         }}
+        .hidden-ui {{
+            display: none !important;
+        }}
+        .muted {{
+            margin-top: 8px;
+            font-size: 0.82em;
+            color: rgba(255,255,255,0.65);
+            line-height: 1.35;
+        }}
+        body.reload-direct #server-panel {{ display: none !important; }}
+        body.reload-direct #loading-ui.hidden-ui {{
+            display: flex !important;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 40vh;
+        }}
     </style>
 </head>
-<body>
-    <div class="loader">
-        <span>L</span>
-        <span>O</span>
-        <span>A</span>
-        <span>D</span>
-        <span>I</span>
-        <span>N</span>
-        <span>G</span>
-        <div class="loading-bar">
-            <div id="loading-progress" class="loading-progress"></div>
+<body{("" if not reload_from_session else ' class="reload-direct"')}>
+    <div class="panel">
+        <div id="server-panel" class="server-form">
+            <div style="font-size:14px;margin-bottom:6px;text-align:center;">Choose Kodi JSON-RPC endpoint</div>
+            <label for="preset-select">Saved servers (from compose / env)</label>
+            <select id="preset-select" aria-label="Preset Kodi server">
+                <option value="__loading__">Loading list…</option>
+            </select>
+            <p class="muted" id="preset-empty-hint" style="display:none;">No preset servers in environment. Use custom host and port below.</p>
+            <label for="custom-host">Custom host or IP</label>
+            <input id="custom-host" type="text" placeholder="e.g. 192.168.1.50" autocomplete="off">
+            <div class="row2">
+                <div>
+                    <label for="custom-port">Port</label>
+                    <input id="custom-port" type="number" min="1" max="65535" value="8080">
+                </div>
+                <div>
+                    <label for="custom-scheme">Scheme</label>
+                    <select id="custom-scheme">
+                        <option value="http" selected>http</option>
+                        <option value="https">https</option>
+                    </select>
+                </div>
+            </div>
+            <label for="custom-user">Username (optional)</label>
+            <input id="custom-user" type="text" autocomplete="username">
+            <label for="custom-pass">Password (optional)</label>
+            <input id="custom-pass" type="password" autocomplete="current-password">
+            <div class="form-actions">
+                <button type="button" class="btn btn-primary" id="load-btn">Load library</button>
+            </div>
         </div>
-        <div id="loading-text" class="loading-text">Loading 0%</div>
+        <div id="loading-ui" class="hidden-ui">
+            <div class="loader">
+                <span>L</span>
+                <span>O</span>
+                <span>A</span>
+                <span>D</span>
+                <span>I</span>
+                <span>N</span>
+                <span>G</span>
+                <div class="loading-bar">
+                    <div id="loading-progress" class="loading-progress"></div>
+                </div>
+                <div id="loading-text" class="loading-text">Loading 0%</div>
+            </div>
+        </div>
     </div>
     <script>
+        window.__KODI_PRESETS__ = __PRESETS_JSON__;
+    </script>
+    <script>
+        const RELOAD_SESSION_ONLY = {reload_lit};
         const POLL_MS = 2000;
-        const bar = document.getElementById('loading-progress');
-        const text = document.getElementById('loading-text');
+        let bar = null;
+        let text = null;
         let jobId = null;
         let pollTimer = null;
         let loadFinished = false;
@@ -1156,10 +1699,40 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
             }}
         }}
 
+        function switchToLoadingUI() {{
+            const sp = document.getElementById('server-panel');
+            const lu = document.getElementById('loading-ui');
+            if (sp) sp.style.display = 'none';
+            if (lu) lu.classList.remove('hidden-ui');
+            bar = document.getElementById('loading-progress');
+            text = document.getElementById('loading-text');
+        }}
+
         function updateProgress(value, message) {{
             const percent = Math.min(100, Math.max(0, Math.round(value)));
-            bar.style.width = percent + '%';
-            text.textContent = message ? message + ' ' + percent + '%' : 'Loading ' + percent + '%';
+            const b = bar || document.getElementById('loading-progress');
+            const t = text || document.getElementById('loading-text');
+            if (b) b.style.width = percent + '%';
+            if (t) t.textContent = message ? message + ' ' + percent + '%' : 'Loading ' + percent + '%';
+        }}
+
+        function buildStartPayload() {{
+            if (RELOAD_SESSION_ONLY) {{
+                return {{ use_session: true }};
+            }}
+            const sel = document.getElementById('preset-select');
+            const val = sel ? sel.value : 'custom';
+            if (val === 'custom') {{
+                return {{
+                    custom: true,
+                    host: (document.getElementById('custom-host') || {{}}).value || '',
+                    port: (document.getElementById('custom-port') || {{}}).value,
+                    scheme: (document.getElementById('custom-scheme') || {{}}).value || 'http',
+                    username: (document.getElementById('custom-user') || {{}}).value || '',
+                    password: (document.getElementById('custom-pass') || {{}}).value || ''
+                }};
+            }}
+            return {{ preset: val }};
         }}
 
         function restartLoad(reason) {{
@@ -1169,9 +1742,14 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
             updateProgress(0, reason || 'Starting over');
             jobId = null;
             pollFailures = 0;
-            fetch('/start-load')
+            const body = buildStartPayload();
+            fetch('/start-load', {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify(body)
+            }})
                 .then(response => {{
-                    if (!response.ok) throw new Error('HTTP ' + response.status);
+                    if (!response.ok) return response.text().then(t => {{ throw new Error(t || ('HTTP ' + response.status)); }});
                     return response.json();
                 }})
                 .then(data => {{
@@ -1182,7 +1760,7 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
                 }})
                 .catch(() => {{
                     reconnectInProgress = false;
-                    window.location.href = '/content/fallback';
+                    window.location.href = '/';
                 }});
         }}
 
@@ -1257,11 +1835,59 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
             }}
         }});
 
-        function startLoad() {{
-            fetch('/start-load')
+        function populatePresets() {{
+            const sel = document.getElementById('preset-select');
+            const emptyHint = document.getElementById('preset-empty-hint');
+            const presets = Array.isArray(window.__KODI_PRESETS__) ? window.__KODI_PRESETS__ : [];
+            if (!sel) return;
+            sel.innerHTML = '';
+            if (!presets.length) {{
+                if (emptyHint) emptyHint.style.display = 'block';
+                const opt = document.createElement('option');
+                opt.value = 'custom';
+                opt.textContent = 'Custom (manual host / port)';
+                sel.appendChild(opt);
+                sel.value = 'custom';
+                return;
+            }}
+            if (emptyHint) emptyHint.style.display = 'none';
+            presets.forEach(p => {{
+                const opt = document.createElement('option');
+                opt.value = String(p.id);
+                const label = p.label || ('Server ' + p.id);
+                const host = p.host || '';
+                opt.textContent = label + (host ? (' — ' + host) : '');
+                sel.appendChild(opt);
+            }});
+            const custom = document.createElement('option');
+            custom.value = 'custom';
+            custom.textContent = 'Custom (manual host / port)';
+            sel.appendChild(custom);
+            sel.value = String(presets[0].id);
+        }}
+
+        function startLoadFromUser() {{
+            switchToLoadingUI();
+            loadFinished = false;
+            stopPolling();
+            pollFailures = 0;
+            jobId = null;
+            const body = buildStartPayload();
+            fetch('/start-load', {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify(body)
+            }})
                 .then(response => {{
                     if (!response.ok) {{
-                        throw new Error('HTTP ' + response.status);
+                        return response.text().then(t => {{
+                            let msg = t || ('HTTP ' + response.status);
+                            try {{
+                                const j = JSON.parse(t);
+                                if (j && j.message) msg = j.message;
+                            }} catch (e) {{}}
+                            throw new Error(msg);
+                        }});
                     }}
                     return response.json();
                 }})
@@ -1270,20 +1896,36 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
                     beginPollingIfVisible();
                     pollStatus();
                 }})
-                .catch(() => {{
-                    window.location.href = '/content/fallback';
+                .catch(err => {{
+                    const msg = (err && err.message) ? String(err.message) : String(err);
+                    alert(msg);
+                    window.location.href = '/';
                 }});
         }}
 
-        setTimeout(startLoad, 100);
+        const lb = document.getElementById('load-btn');
+        if (lb) {{
+            lb.addEventListener('click', () => startLoadFromUser());
+        }}
+        if (RELOAD_SESSION_ONLY) {{
+            startLoadFromUser();
+        }} else {{
+            populatePresets();
+        }}
     </script>
 </body>
 </html>
-        """
+        """.replace("__PRESETS_JSON__", presets_json)
     
     @app.route('/')
     def index():
-        return generate_loading_html()
+        return generate_loading_html(False)
+
+    @app.route('/session-reload')
+    def session_reload():
+        """Reload dashboard using Kodi connection stored in Flask session."""
+        return generate_loading_html(True)
+
 
     def update_job(job_id: str, progress: int, message: str = None, status: str = "running"):
         with load_lock:
@@ -1296,12 +1938,15 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
             job["status"] = status
             job["updated_at"] = time.time()
 
-    def run_load_job(job_id: str):
+    def run_load_job(job_id: str, conn: Dict[str, Any]):
         try:
             update_job(job_id, 5, "Connecting")
-            probe = KodiLibraryProbe(kodi_host, None, kodi_username, kodi_password)
+            probe = KodiLibraryProbe(
+                conn["host"], None, conn.get("username") or "", conn.get("password") or ""
+            )
             if not probe.connect():
-                error_message = probe.last_error or f"Unable to connect to Kodi at {kodi_host}/jsonrpc"
+                host_display = conn.get("host", "")
+                error_message = probe.last_error or f"Unable to connect to Kodi at {host_display}"
                 update_job(job_id, 100, error_message, status="error")
                 return
             stats = LibraryStats()
@@ -1329,31 +1974,54 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
                         update_job(job_id, progress, "Movies")
             stats.watched_movies = watched_movies
 
-            # TV shows + episodes (somewhat fine-grained)
+            # TV shows + episodes (global totals — fast)
             update_job(job_id, 30, "TV shows")
-            tv_shows_result = probe._make_request("VideoLibrary.GetTVShows", {
-                "limits": {"start": 0, "end": 100000}
-            })
+            tv_shows_result = probe._make_request(
+                "VideoLibrary.GetTVShows", {"limits": {"start": 0, "end": 100000}}
+            )
             stats.total_tv_shows = tv_shows_result.get("result", {}).get("limits", {}).get("total", 0)
             update_job(job_id, 35, "TV stats")
+
+            ep_quick = probe._make_request(
+                "VideoLibrary.GetEpisodes",
+                {"limits": {"start": 0, "end": 1}},
+                timeout=60,
+            )
+            stats.total_episodes = int(
+                (ep_quick.get("result") or {}).get("limits", {}).get("total") or 0
+            )
+
             stats_result = probe._make_request("VideoLibrary.GetStatistics", {}, timeout=30)
             if stats_result and "result" in stats_result:
                 statistics = stats_result["result"].get("statistics", {})
-                stats.total_episodes = statistics.get("episode", 0)
-                stats.watched_episodes = statistics.get("episode.watched", 0)
+                stats.watched_episodes = int(statistics.get("episode.watched", 0) or 0)
+                if stats.total_episodes <= 0:
+                    stats.total_episodes = int(statistics.get("episode", 0) or 0)
+                update_job(job_id, 45, "TV stats")
+            elif stats.total_episodes > 0:
+                update_job(job_id, 38, "Watched episodes")
+                stats.watched_episodes, scan_total = _watched_episodes_paginated(probe)
+                if stats.total_episodes <= 0 and scan_total > 0:
+                    stats.total_episodes = scan_total
                 update_job(job_id, 45, "TV stats")
             else:
                 update_job(job_id, 36, "Episodes")
-                episodes_result = probe._make_request("VideoLibrary.GetEpisodes", {
-                    "properties": ["playcount"],
-                    "limits": {"start": 0, "end": 100000}
-                }, timeout=120)
+                episodes_result = probe._make_request(
+                    "VideoLibrary.GetEpisodes",
+                    {
+                        "properties": ["playcount"],
+                        "limits": {"start": 0, "end": 100000},
+                    },
+                    timeout=120,
+                )
                 episodes = episodes_result.get("result", {}).get("episodes", [])
-                stats.total_episodes = episodes_result.get("result", {}).get("limits", {}).get("total", 0)
+                stats.total_episodes = episodes_result.get("result", {}).get("limits", {}).get(
+                    "total", 0
+                )
                 watched_episodes = 0
                 episode_count = len(episodes)
                 if episode_count == 0:
-                    update_job(job_id, 55, "Episodes")
+                    update_job(job_id, 45, "TV stats")
                 else:
                     step = max(1, episode_count // 20)
                     for idx, episode in enumerate(episodes, 1):
@@ -1364,7 +2032,8 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
                             update_job(job_id, progress, "Episodes")
                 stats.watched_episodes = watched_episodes
 
-            # Music (per-request progress)
+            if stats.total_episodes > 0 and stats.watched_episodes > stats.total_episodes:
+                stats.watched_episodes = stats.total_episodes
             update_job(job_id, 58, "Artists")
             artists_result = probe._make_request("AudioLibrary.GetArtists", {
                 "limits": {"start": 0, "end": 100000}
@@ -1405,7 +2074,7 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
 
             update_job(job_id, 95, "Rendering")
             last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            html_content = build_content_html(stats, last_updated, show_loading_overlay=False)
+            html_content = build_content_html(stats, last_updated, conn, show_loading_overlay=False)
             with load_lock:
                 job = load_jobs.get(job_id)
                 if job is not None:
@@ -1414,8 +2083,24 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
         except Exception as e:
             update_job(job_id, 100, f"Error: {str(e)}", status="error")
 
-    @app.route('/start-load')
+    @app.route('/start-load', methods=['GET', 'POST'])
     def start_load():
+        conn = None
+        err = None
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            conn, err = resolve_start_load_connection(data, preset_servers)
+        else:
+            conn, err = default_connection_for_get(preset_servers)
+
+        if err or not conn:
+            msg = err or "Unable to resolve Kodi connection"
+            return jsonify({"success": False, "message": msg}), 400
+
+        session["kodi_connection"] = dict(conn)
+        session.permanent = True
+        session.modified = True
+
         job_id = uuid.uuid4().hex
         with load_lock:
             load_jobs[job_id] = {
@@ -1424,11 +2109,18 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
                 "message": "Starting",
                 "created_at": time.time(),
                 "updated_at": time.time(),
-                "html": None
+                "html": None,
             }
-        thread = threading.Thread(target=run_load_job, args=(job_id,), daemon=True)
+        conn_copy = dict(conn)
+        thread = threading.Thread(target=run_load_job, args=(job_id, conn_copy), daemon=True)
         thread.start()
         return jsonify({"job_id": job_id})
+
+    @app.route('/api/servers')
+    def api_servers():
+        """Preset servers only (safe to expose — no passwords)."""
+        payload = [{"id": p["id"], "label": p["label"], "host": p["host"]} for p in preset_servers]
+        return jsonify({"servers": payload})
 
     @app.route('/load-status/<job_id>')
     def load_status(job_id):
@@ -1554,98 +2246,34 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
     @app.route('/update-video-library', methods=['POST'])
     def update_video_library():
         """Update video library using Kodi JSON-RPC"""
-        try:
-            payload = {"jsonrpc": "2.0", "method": "VideoLibrary.Scan", "id": 1}
-            response = requests.post(
-                f"{kodi_host}/jsonrpc",
-                headers={"Content-Type": "application/json"},
-                json=payload,
-                auth=(kodi_username, kodi_password) if kodi_username and kodi_password else None,
-                timeout=30
-            )
-            response.raise_for_status()
-            result = response.json()
-            if result.get("result") == "OK":
-                return jsonify({"success": True, "message": "Video library update started successfully"})
-            return jsonify({"success": False, "message": f"Unexpected response: {result}"})
-        except requests.Timeout:
-            return jsonify({"success": False, "message": "Request timed out"})
-        except requests.RequestException as e:
-            return jsonify({"success": False, "message": f"Request error: {str(e)}"})
-        except Exception as e:
-            return jsonify({"success": False, "message": f"Error: {str(e)}"})
+        ok, err = _run_kodi_rpc("VideoLibrary.Scan")
+        if ok:
+            return jsonify({"success": True, "message": "Video library update started successfully"})
+        return jsonify({"success": False, "message": err})
     
     @app.route('/update-audio-library', methods=['POST'])
     def update_audio_library():
         """Update audio library using Kodi JSON-RPC"""
-        try:
-            payload = {"jsonrpc": "2.0", "method": "AudioLibrary.Scan", "id": 1}
-            response = requests.post(
-                f"{kodi_host}/jsonrpc",
-                headers={"Content-Type": "application/json"},
-                json=payload,
-                auth=(kodi_username, kodi_password) if kodi_username and kodi_password else None,
-                timeout=30
-            )
-            response.raise_for_status()
-            result = response.json()
-            if result.get("result") == "OK":
-                return jsonify({"success": True, "message": "Audio library update started successfully"})
-            return jsonify({"success": False, "message": f"Unexpected response: {result}"})
-        except requests.Timeout:
-            return jsonify({"success": False, "message": "Request timed out"})
-        except requests.RequestException as e:
-            return jsonify({"success": False, "message": f"Request error: {str(e)}"})
-        except Exception as e:
-            return jsonify({"success": False, "message": f"Error: {str(e)}"})
+        ok, err = _run_kodi_rpc("AudioLibrary.Scan")
+        if ok:
+            return jsonify({"success": True, "message": "Audio library update started successfully"})
+        return jsonify({"success": False, "message": err})
     
     @app.route('/clean-video-library', methods=['POST'])
     def clean_video_library():
         """Clean video library using Kodi JSON-RPC"""
-        try:
-            payload = {"jsonrpc": "2.0", "method": "VideoLibrary.Clean", "id": 1}
-            response = requests.post(
-                f"{kodi_host}/jsonrpc",
-                headers={"Content-Type": "application/json"},
-                json=payload,
-                auth=(kodi_username, kodi_password) if kodi_username and kodi_password else None,
-                timeout=30
-            )
-            response.raise_for_status()
-            result = response.json()
-            if result.get("result") == "OK":
-                return jsonify({"success": True, "message": "Video library clean started successfully"})
-            return jsonify({"success": False, "message": f"Unexpected response: {result}"})
-        except requests.Timeout:
-            return jsonify({"success": False, "message": "Request timed out"})
-        except requests.RequestException as e:
-            return jsonify({"success": False, "message": f"Request error: {str(e)}"})
-        except Exception as e:
-            return jsonify({"success": False, "message": f"Error: {str(e)}"})
+        ok, err = _run_kodi_rpc("VideoLibrary.Clean")
+        if ok:
+            return jsonify({"success": True, "message": "Video library clean started successfully"})
+        return jsonify({"success": False, "message": err})
     
     @app.route('/clean-music-library', methods=['POST'])
     def clean_music_library():
         """Clean music library using Kodi JSON-RPC"""
-        try:
-            payload = {"jsonrpc": "2.0", "method": "AudioLibrary.Clean", "id": 1}
-            response = requests.post(
-                f"{kodi_host}/jsonrpc",
-                headers={"Content-Type": "application/json"},
-                json=payload,
-                auth=(kodi_username, kodi_password) if kodi_username and kodi_password else None,
-                timeout=30
-            )
-            response.raise_for_status()
-            result = response.json()
-            if result.get("result") == "OK":
-                return jsonify({"success": True, "message": "Music library clean started successfully"})
-            return jsonify({"success": False, "message": f"Unexpected response: {result}"})
-        except requests.Timeout:
-            return jsonify({"success": False, "message": "Request timed out"})
-        except requests.RequestException as e:
-            return jsonify({"success": False, "message": f"Request error: {str(e)}"})
-        except Exception as e:
-            return jsonify({"success": False, "message": f"Error: {str(e)}"})
+        ok, err = _run_kodi_rpc("AudioLibrary.Clean")
+        if ok:
+            return jsonify({"success": True, "message": "Music library clean started successfully"})
+        return jsonify({"success": False, "message": err})
     
     print(f"🌐 Starting web server on port {web_port}")
     print(f"📊 Access statistics at: http://localhost:{web_port} or container host IP: http://{container_host}:{web_port}")
