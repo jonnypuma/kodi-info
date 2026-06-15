@@ -31,7 +31,7 @@ from datetime import datetime
 
 try:
     import requests
-    from flask import Flask, send_file, request, jsonify, session
+    from flask import Flask, send_file, request, jsonify, session, redirect
 except ImportError:
     print("Error: Required packages not found. Please install with: pip install -r requirements.txt")
     sys.exit(1)
@@ -85,14 +85,18 @@ class KodiLibraryProbe:
             username: Kodi username (optional)
             password: Kodi password (optional)
         """
-        # Parse host - if it's a URL, extract host and port
+        # Parse host - if it's a URL, extract host and port (and optional userinfo)
         if host.startswith("http://") or host.startswith("https://"):
-            from urllib.parse import urlparse
+            from urllib.parse import urlparse, unquote
 
             parsed = urlparse(host)
             self.host = parsed.hostname
             self.port = parsed.port or (8080 if parsed.scheme == "http" else 443)
             self.scheme = parsed.scheme
+            if not username and parsed.username:
+                username = unquote(parsed.username)
+            if not password and parsed.password:
+                password = unquote(parsed.password)
         else:
             # Bare hostname or IPv4 — may embed :port (common in env: "192.168.1.5:9090").
             explicit_port = port
@@ -168,7 +172,19 @@ class KodiLibraryProbe:
         except Exception as e:
             print(f"✗ Failed to connect to Kodi at {self.base_url}")
             print(f"  Error: {str(e)}")
-            self.last_error = f"Unable to reach {self.base_url}: {str(e)}"
+            err_text = str(e)
+            if "401" in err_text and self.auth is None:
+                self.last_error = (
+                    f"401 Unauthorized at {self.base_url} — no HTTP username/password "
+                    "configured for this preset (set KODI_USERNAME / KODI_PASSWORD or "
+                    f"KODI_USERNAME_N / KODI_PASSWORD_N in env)"
+                )
+            elif "401" in err_text:
+                self.last_error = (
+                    f"401 Unauthorized at {self.base_url} — check Kodi HTTP username/password"
+                )
+            else:
+                self.last_error = f"Unable to reach {self.base_url}: {err_text}"
             return False
     
     def _make_request(self, method: str, params: dict = None, timeout: int = 10) -> dict:
@@ -556,7 +572,14 @@ def format_recent_item(item, item_type, kodi_host=None, probe=None):
         }
     return {}
 
-def generate_html(stats: LibraryStats, kodi_display: str, last_updated: str, probe=None, show_loading_overlay: bool = True) -> str:
+def generate_html(
+    stats: LibraryStats,
+    kodi_display: str,
+    last_updated: str,
+    probe=None,
+    show_loading_overlay: bool = True,
+    rpc_embed: Optional[Dict[str, Any]] = None,
+) -> str:
     """Generate HTML output for Homarr iframe integration"""
 
     artwork_base_url = kodi_display
@@ -695,13 +718,24 @@ def generate_html(stats: LibraryStats, kodi_display: str, last_updated: str, pro
             }
         })();"""
 
+    rpc_embed_fragment = ""
+    if rpc_embed is not None:
+        embed_obj = {
+            "host": str(rpc_embed.get("host") or "").strip(),
+            "username": str(rpc_embed.get("username") or ""),
+            "password": str(rpc_embed.get("password") or ""),
+        }
+        js = json.dumps(embed_obj, ensure_ascii=True, separators=(",", ":"))
+        js = js.replace("</", "<\\/")  # allow passwords with "<" safely inside <script type="application/json">
+        rpc_embed_fragment = f'    <script type="application/json" id="kodi-rpc-connection-json">{js}</script>\n'
+
     # Clean HTML template
     html_content = f"""
 <!DOCTYPE html>
 <html>
 <head>
     <title>Kodi Library Statistics</title>
-    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+{rpc_embed_fragment}    <link rel="icon" type="image/x-icon" href="/favicon.ico">
     <link rel="shortcut icon" type="image/x-icon" href="/favicon.ico">
     <link rel="icon" href="/favicon.ico" sizes="16x16" type="image/x-icon">
     <link rel="icon" href="/favicon.ico" sizes="32x32" type="image/x-icon">
@@ -1009,8 +1043,26 @@ def generate_html(stats: LibraryStats, kodi_display: str, last_updated: str, pro
             }}, ms);
         }}
 
+        function rpcBodyForLibraryActions() {{
+            const el = document.getElementById('kodi-rpc-connection-json');
+            if (!el || !el.textContent) {{
+                return JSON.stringify({{}});
+            }}
+            try {{
+                const embedded = JSON.parse(el.textContent);
+                return JSON.stringify({{ kodi_rpc_connection: embedded }});
+            }} catch (e) {{
+                return JSON.stringify({{}});
+            }}
+        }}
+
         function fetchLibraryActionJson(url) {{
-            return fetch(url, {{ method: 'POST' }}).then(async (response) => {{
+            return fetch(url, {{
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: rpcBodyForLibraryActions()
+            }}).then(async (response) => {{
                 const text = await response.text();
                 let data = {{}};
                 if (text) {{
@@ -1215,6 +1267,31 @@ def save_statistics_to_json(stats: LibraryStats, filename: str = "kodi_library_s
         print(f"⚠️  Error saving to file: {str(e)}")
 
 
+def _global_kodi_credentials() -> Tuple[str, str]:
+    """Shared fallback username/password from unnumbered env vars."""
+    return (
+        (os.getenv("KODI_USERNAME") or "").strip(),
+        (os.getenv("KODI_PASSWORD") or "").strip(),
+    )
+
+
+def _slot_kodi_credentials(slot_index: Optional[int]) -> Tuple[str, str]:
+    """
+    Credentials for a numbered slot (1–10), falling back to KODI_USERNAME / KODI_PASSWORD
+    when KODI_USERNAME_N / KODI_PASSWORD_N are unset or empty.
+    """
+    global_user, global_pass = _global_kodi_credentials()
+    if slot_index is None:
+        return global_user, global_pass
+    user = (os.getenv(f"KODI_USERNAME_{slot_index}") or "").strip()
+    pwd = (os.getenv(f"KODI_PASSWORD_{slot_index}") or "").strip()
+    if not user:
+        user = global_user
+    if not pwd:
+        pwd = global_pass
+    return user, pwd
+
+
 def collect_preset_kodi_servers() -> List[Dict[str, str]]:
     """
     Each non-empty Kodi target is its own preset (dropdown row). No merging.
@@ -1229,11 +1306,12 @@ def collect_preset_kodi_servers() -> List[Dict[str, str]]:
     legacy_host = (os.getenv("KODI_HOST") or "").strip()
     if legacy_host:
         lbl = (os.getenv("KODI_LABEL") or "").strip()
+        legacy_user, legacy_pass = _global_kodi_credentials()
         raw_slots.append(
             {
                 "host": legacy_host,
-                "username": (os.getenv("KODI_USERNAME") or "").strip(),
-                "password": (os.getenv("KODI_PASSWORD") or "").strip(),
+                "username": legacy_user,
+                "password": legacy_pass,
                 "label": lbl if lbl else "Primary",
             }
         )
@@ -1243,11 +1321,12 @@ def collect_preset_kodi_servers() -> List[Dict[str, str]]:
         if not h:
             continue
         lbl = (os.getenv(f"KODI_LABEL_{i}") or "").strip()
+        slot_user, slot_pass = _slot_kodi_credentials(i)
         raw_slots.append(
             {
                 "host": h,
-                "username": (os.getenv(f"KODI_USERNAME_{i}") or "").strip(),
-                "password": (os.getenv(f"KODI_PASSWORD_{i}") or "").strip(),
+                "username": slot_user,
+                "password": slot_pass,
                 "label": lbl if lbl else f"Server {i}",
             }
         )
@@ -1363,6 +1442,24 @@ def default_connection_for_get(presets: List[Dict[str, str]]) -> Tuple[Optional[
     return connection_dict_for_preset(presets[0]), None
 
 
+def _parse_embedded_kodi_rpc(emb: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Validate kodi_rpc_connection from POST JSON (same shape as session kodi_connection
+    subset). Used when the browser drops the Flask session cookie but still shows this
+    page (e.g. dashboard injected via document.write from /content/... responses).
+    """
+    host = (emb.get("host") or "").strip()
+    if not host or not (host.startswith("http://") or host.startswith("https://")):
+        return None
+    u = emb.get("username")
+    pw = emb.get("password")
+    return {
+        "host": host,
+        "username": "" if u is None else str(u),
+        "password": "" if pw is None else str(pw),
+    }
+
+
 def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
     """Create Flask web server to serve HTML statistics"""
     app = Flask(__name__)
@@ -1385,13 +1482,30 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
 
     def _get_session_connection() -> Optional[Dict[str, Any]]:
         conn = session.get("kodi_connection")
-        return conn if isinstance(conn, dict) and conn.get("host") else None
+        if not isinstance(conn, dict):
+            return None
+        h = conn.get("host")
+        if h is None or not str(h).strip():
+            return None
+        return conn
 
-    def _run_kodi_rpc(method: str, conn: Optional[Dict[str, Any]] = None) -> tuple[bool, str]:
+    def _effective_rpc_connection() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        sc = _get_session_connection()
+        if sc:
+            return sc, None
+        body = request.get_json(silent=True) or {}
+        emb = body.get("kodi_rpc_connection")
+        if isinstance(emb, dict):
+            parsed = _parse_embedded_kodi_rpc(emb)
+            if parsed:
+                return parsed, None
+        return None, "No Kodi connection selected — open the homepage and choose a server"
+
+    def _run_kodi_rpc(method: str) -> tuple[bool, str]:
         """POST JSON-RPC to Kodi using the same endpoint resolution as KodiLibraryProbe."""
-        active = conn or _get_session_connection()
+        active, conn_err = _effective_rpc_connection()
         if not active or not active.get("host"):
-            return False, "No Kodi connection selected — open the homepage and choose a server"
+            return False, conn_err or "No Kodi connection selected — open the homepage and choose a server"
         probe = KodiLibraryProbe(
             active["host"], None, active.get("username") or "", active.get("password") or ""
         )
@@ -1465,6 +1579,11 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
             last_updated,
             probe,
             show_loading_overlay=show_loading_overlay,
+            rpc_embed={
+                "host": conn["host"],
+                "username": conn.get("username") or "",
+                "password": conn.get("password") or "",
+            },
         )
         return html_content
 
@@ -1533,6 +1652,48 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
             grid-template-columns: 1fr 120px;
             gap: 10px;
             align-items: end;
+        }}
+        .custom-host-wrap {{
+            position: relative;
+        }}
+        .recent-dropdown {{
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: calc(100% + 6px);
+            z-index: 50;
+            max-height: 260px;
+            overflow-y: auto;
+            background: rgba(24, 24, 28, 0.98);
+            border: 1px solid rgba(255,255,255,0.18);
+            border-radius: 10px;
+            box-shadow: 0 10px 28px rgba(0,0,0,0.45);
+        }}
+        .recent-dropdown[hidden] {{
+            display: none !important;
+        }}
+        .recent-dropdown-header {{
+            font-size: 0.68em;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: rgba(255,255,255,0.55);
+            padding: 8px 10px 4px;
+        }}
+        .recent-dropdown-item {{
+            display: block;
+            width: 100%;
+            text-align: left;
+            padding: 10px 12px;
+            border: none;
+            border-top: 1px solid rgba(255,255,255,0.08);
+            background: transparent;
+            color: #fff;
+            font-size: 13px;
+            cursor: pointer;
+            font-family: Arial, sans-serif;
+        }}
+        .recent-dropdown-item:hover {{
+            background: rgba(33, 150, 243, 0.25);
         }}
         .form-actions {{
             margin-top: 14px;
@@ -1610,6 +1771,20 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
             letter-spacing: 0.5px;
             text-align: center;
         }}
+        .load-error-panel {{
+            margin-top: 8px;
+            text-align: center;
+            max-width: 520px;
+            padding: 0 12px;
+        }}
+        .load-error-message {{
+            color: rgba(255, 255, 255, 0.92);
+            font-size: 0.95em;
+            line-height: 1.45;
+            white-space: pre-wrap;
+            word-break: break-word;
+            margin: 0 0 18px;
+        }}
         .hidden-ui {{
             display: none !important;
         }}
@@ -1639,7 +1814,10 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
             </select>
             <p class="muted" id="preset-empty-hint" style="display:none;">No preset servers in environment. Use custom host and port below.</p>
             <label for="custom-host">Custom host or IP</label>
-            <input id="custom-host" type="text" placeholder="e.g. 192.168.1.50" autocomplete="off">
+            <div class="custom-host-wrap">
+            <input id="custom-host" type="text" placeholder="e.g. 192.168.1.50" autocomplete="off" aria-controls="custom-recent-dropdown" aria-autocomplete="list">
+            <div id="custom-recent-dropdown" class="recent-dropdown" hidden role="listbox" aria-label="Recently used custom servers"></div>
+            </div>
             <div class="row2">
                 <div>
                     <label for="custom-port">Port</label>
@@ -1675,6 +1853,10 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
                 </div>
                 <div id="loading-text" class="loading-text">Loading 0%</div>
             </div>
+            <div id="load-error-panel" class="hidden-ui load-error-panel">
+                <p id="load-error-message" class="load-error-message"></p>
+                <button type="button" class="btn btn-primary" id="load-error-home-btn">Choose server again</button>
+            </div>
         </div>
     </div>
     <script>
@@ -1692,6 +1874,119 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
         /** Consecutive transport/poll failures — stop hammering after a few. */
         let pollFailures = 0;
 
+        const RECENT_CUSTOM_STORAGE_KEY = 'kodiinfo_recent_custom_v1';
+        const RECENT_CUSTOM_MAX = 10;
+
+        function recentCustomNormalizeEntry(o) {{
+            if (!o || typeof o !== 'object') return null;
+            const h = String(o.h || '').trim();
+            if (!h) return null;
+            let p = parseInt(o.p, 10);
+            if (!Number.isFinite(p) || p < 1 || p > 65535) p = 8080;
+            const s = (String(o.s || 'http').toLowerCase() === 'https') ? 'https' : 'http';
+            const u = String(o.u || '').trim();
+            return {{ h, p, s, u }};
+        }}
+
+        function recentCustomServersLoad() {{
+            try {{
+                const raw = localStorage.getItem(RECENT_CUSTOM_STORAGE_KEY);
+                if (!raw) return [];
+                const arr = JSON.parse(raw);
+                if (!Array.isArray(arr)) return [];
+                const out = [];
+                for (let i = 0; i < arr.length; i++) {{
+                    const n = recentCustomNormalizeEntry(arr[i]);
+                    if (n) out.push(n);
+                }}
+                return out.slice(0, RECENT_CUSTOM_MAX);
+            }} catch (e) {{
+                return [];
+            }}
+        }}
+
+        function recentCustomServersSave(body) {{
+            if (!body || !body.custom) return;
+            const host = String(body.host || '').trim();
+            if (!host) return;
+            let port = parseInt(body.port, 10);
+            if (!Number.isFinite(port) || port < 1 || port > 65535) port = 8080;
+            const scheme = (String(body.scheme || 'http').toLowerCase() === 'https') ? 'https' : 'http';
+            const username = String(body.username || '').trim();
+            const entry = {{ h: host, p: port, s: scheme, u: username }};
+            try {{
+                let list = recentCustomServersLoad();
+                const key = entry.h.toLowerCase() + '|' + entry.p + '|' + entry.s + '|' + entry.u;
+                list = list.filter((e) => {{
+                    const k = e.h.toLowerCase() + '|' + e.p + '|' + e.s + '|' + e.u;
+                    return k !== key;
+                }});
+                list.unshift(entry);
+                list = list.slice(0, RECENT_CUSTOM_MAX);
+                localStorage.setItem(RECENT_CUSTOM_STORAGE_KEY, JSON.stringify(list));
+            }} catch (e) {{}}
+        }}
+
+        function refreshRecentCustomDropdown() {{
+            const box = document.getElementById('custom-recent-dropdown');
+            if (!box) return;
+            const list = recentCustomServersLoad();
+            box.innerHTML = '';
+            if (!list.length) {{
+                box.hidden = true;
+                return;
+            }}
+            const hdr = document.createElement('div');
+            hdr.className = 'recent-dropdown-header';
+            hdr.textContent = 'Recent (this browser, last ' + RECENT_CUSTOM_MAX + ')';
+            box.appendChild(hdr);
+            list.forEach((e) => {{
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'recent-dropdown-item';
+                btn.setAttribute('role', 'option');
+                const line = e.h + ':' + e.p + ' (' + e.s + ')' + (e.u ? (' · ' + e.u) : '');
+                btn.textContent = line;
+                btn.addEventListener('click', () => {{
+                    const ch = document.getElementById('custom-host');
+                    const cp = document.getElementById('custom-port');
+                    const cs = document.getElementById('custom-scheme');
+                    const cu = document.getElementById('custom-user');
+                    const pw = document.getElementById('custom-pass');
+                    if (ch) ch.value = e.h;
+                    if (cp) cp.value = String(e.p);
+                    if (cs) cs.value = e.s;
+                    if (cu) cu.value = e.u || '';
+                    if (pw) pw.value = '';
+                    box.hidden = true;
+                    if (ch) ch.focus();
+                }});
+                box.appendChild(btn);
+            }});
+        }}
+
+        function recentCustomServersInit() {{
+            const wrap = document.querySelector('.custom-host-wrap');
+            const hostEl = document.getElementById('custom-host');
+            const dd = document.getElementById('custom-recent-dropdown');
+            if (!wrap || !hostEl || !dd) return;
+
+            hostEl.addEventListener('focus', () => {{
+                refreshRecentCustomDropdown();
+                dd.hidden = recentCustomServersLoad().length === 0;
+            }});
+
+            hostEl.addEventListener('keydown', (ev) => {{
+                if (ev.key === 'Escape') dd.hidden = true;
+            }});
+
+            wrap.addEventListener('focusout', () => {{
+                window.setTimeout(() => {{
+                    if (!wrap.matches(':focus-within')) dd.hidden = true;
+                }}, 0);
+            }});
+        }}
+
         function stopPolling() {{
             if (pollTimer) {{
                 clearInterval(pollTimer);
@@ -1706,6 +2001,27 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
             if (lu) lu.classList.remove('hidden-ui');
             bar = document.getElementById('loading-progress');
             text = document.getElementById('loading-text');
+        }}
+
+        function showLoadError(message) {{
+            loadFinished = true;
+            stopPolling();
+            switchToLoadingUI();
+            const loader = document.querySelector('#loading-ui .loader');
+            const panel = document.getElementById('load-error-panel');
+            const msgEl = document.getElementById('load-error-message');
+            if (loader) loader.style.display = 'none';
+            if (msgEl) msgEl.textContent = message || 'Could not load library.';
+            if (panel) panel.classList.remove('hidden-ui');
+        }}
+
+        function resetLoadErrorUI() {{
+            const loader = document.querySelector('#loading-ui .loader');
+            const panel = document.getElementById('load-error-panel');
+            const msgEl = document.getElementById('load-error-message');
+            if (loader) loader.style.display = '';
+            if (panel) panel.classList.add('hidden-ui');
+            if (msgEl) msgEl.textContent = '';
         }}
 
         function updateProgress(value, message) {{
@@ -1754,13 +2070,14 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
                 }})
                 .then(data => {{
                     reconnectInProgress = false;
+                    recentCustomServersSave(body);
                     jobId = data.job_id;
                     beginPollingIfVisible();
                     pollStatus();
                 }})
                 .catch(() => {{
                     reconnectInProgress = false;
-                    window.location.href = '/';
+                    showLoadError('Could not reconnect — choose a server and try again.');
                 }});
         }}
 
@@ -1790,7 +2107,10 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
                         loadFinished = true;
                         stopPolling();
                         fetch('/content/' + jobId)
-                            .then(response => response.text())
+                            .then(response => {{
+                                if (!response.ok) throw new Error('HTTP ' + response.status);
+                                return response.text();
+                            }})
                             .then(html => {{
                                 document.body.style.opacity = '0';
                                 document.body.style.transition = 'opacity 0.4s ease';
@@ -1801,19 +2121,16 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
                                 }}, 400);
                             }})
                             .catch(() => {{
-                                window.location.href = '/content/fallback';
+                                window.location.replace('/');
                             }});
                     }} else if (data.status === 'error') {{
-                        loadFinished = true;
-                        stopPolling();
-                        text.textContent = data.message || 'Error loading';
+                        showLoadError(data.message || 'Error loading');
                     }}
                 }})
                 .catch(() => {{
                     pollFailures += 1;
                     if (pollFailures >= 8) {{
-                        stopPolling();
-                        text.textContent = 'Lost connection — refresh the page.';
+                        showLoadError('Lost connection — choose a server and try again.');
                     }}
                 }});
         }}
@@ -1868,6 +2185,7 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
 
         function startLoadFromUser() {{
             switchToLoadingUI();
+            resetLoadErrorUI();
             loadFinished = false;
             stopPolling();
             pollFailures = 0;
@@ -1892,16 +2210,26 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
                     return response.json();
                 }})
                 .then(data => {{
+                    recentCustomServersSave(body);
                     jobId = data.job_id;
                     beginPollingIfVisible();
                     pollStatus();
                 }})
                 .catch(err => {{
                     const msg = (err && err.message) ? String(err.message) : String(err);
-                    alert(msg);
-                    window.location.href = '/';
+                    showLoadError(msg);
                 }});
         }}
+
+        const loadErrHomeBtn = document.getElementById('load-error-home-btn');
+        if (loadErrHomeBtn) {{
+            loadErrHomeBtn.addEventListener('click', () => window.location.replace('/'));
+        }}
+        window.addEventListener('pageshow', (ev) => {{
+            if (ev.persisted && window.location.pathname.indexOf('/content/') === 0) {{
+                window.location.replace('/');
+            }}
+        }});
 
         const lb = document.getElementById('load-btn');
         if (lb) {{
@@ -1911,6 +2239,7 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
             startLoadFromUser();
         }} else {{
             populatePresets();
+            recentCustomServersInit();
         }}
     </script>
 </body>
@@ -2136,14 +2465,17 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
 
     @app.route('/content/<job_id>')
     def content(job_id):
+        """Serve completed dashboard HTML, or send users back to the server picker."""
         if job_id == "fallback":
-            return "<h1>Loading failed. Please refresh.</h1>", 503
+            return redirect('/')
         with load_lock:
             job = load_jobs.get(job_id)
             if not job:
-                return "<h1>Loading job not found.</h1>", 404
+                return redirect('/')
+            if job["status"] == "error":
+                return redirect('/')
             if job["status"] != "done" or not job.get("html"):
-                return "<h1>Still loading...</h1>", 202
+                return redirect('/')
             html_content = job["html"]
         return html_content
     
