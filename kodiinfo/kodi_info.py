@@ -790,15 +790,38 @@ def generate_html(
             padding: 12px 14px;
             border-radius: 8px;
             font-size: 0.92em;
-            white-space: pre-wrap;
-            word-break: break-word;
             text-align: left;
-            max-height: 240px;
-            overflow-y: auto;
             color: rgba(255, 255, 255, 0.95);
+            align-items: flex-start;
+            gap: 10px;
         }}
         .action-status.visible {{
-            display: block;
+            display: flex;
+        }}
+        .action-status-body {{
+            flex: 1;
+            min-width: 0;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 240px;
+            overflow-y: auto;
+        }}
+        .action-status-close {{
+            flex-shrink: 0;
+            width: 28px;
+            height: 28px;
+            margin: -4px -4px 0 0;
+            padding: 0;
+            border: none;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.12);
+            color: rgba(255, 255, 255, 0.9);
+            font-size: 18px;
+            line-height: 1;
+            cursor: pointer;
+        }}
+        .action-status-close:hover {{
+            background: rgba(255, 255, 255, 0.22);
         }}
         .action-status.ok {{
             background: rgba(40, 167, 69, 0.28);
@@ -938,7 +961,10 @@ def generate_html(
             <button id="clean-music-btn" class="btn" onclick="cleanLibrary('music')">Clean Music Library</button>
             <img src="/refresh.png" alt="Refresh" onclick="window.location.href='/session-reload'" style="width: 40px; height: 40px; margin-left: 10px; cursor: pointer; vertical-align: middle;" title="Refresh library (same server)">
         </div>
-        <div id="library-action-status" class="action-status" role="status" aria-live="polite" aria-atomic="true" hidden></div>
+        <div id="library-action-status" class="action-status" role="status" aria-live="polite" aria-atomic="true" hidden>
+            <div id="library-action-status-body" class="action-status-body"></div>
+            <button type="button" id="library-action-status-close" class="action-status-close" aria-label="Dismiss notification" onclick="clearLibraryActionStatus()">&times;</button>
+        </div>
         
         <div class="stats">
             <div class="stat-column">
@@ -1017,21 +1043,37 @@ def generate_html(
 
         const LIB_BTN_RESET_OK_MS = 4000;
         const LIB_BTN_RESET_ERR_MS = 12000;
+        const LIB_ACTION_STATUS_AUTO_HIDE_MS = 20000;
+        let libraryActionStatusTimer = null;
 
         function showLibraryActionStatus(level, summary, detail) {{
             const box = document.getElementById('library-action-status');
-            if (!box) return;
+            const body = document.getElementById('library-action-status-body');
+            if (!box || !body) return;
+            if (libraryActionStatusTimer) {{
+                clearTimeout(libraryActionStatusTimer);
+                libraryActionStatusTimer = null;
+            }}
             const ts = '[' + new Date().toLocaleTimeString() + '] ';
+            body.textContent = ts + summary + (detail ? ('\\n' + detail) : '');
             box.hidden = false;
-            box.textContent = ts + summary + (detail ? ('\\n' + detail) : '');
             box.className = 'action-status visible ' + (level === 'ok' ? 'ok' : 'err');
+            libraryActionStatusTimer = window.setTimeout(() => {{
+                libraryActionStatusTimer = null;
+                clearLibraryActionStatus();
+            }}, LIB_ACTION_STATUS_AUTO_HIDE_MS);
         }}
 
         function clearLibraryActionStatus() {{
+            if (libraryActionStatusTimer) {{
+                clearTimeout(libraryActionStatusTimer);
+                libraryActionStatusTimer = null;
+            }}
             const box = document.getElementById('library-action-status');
+            const body = document.getElementById('library-action-status-body');
             if (!box) return;
             box.hidden = true;
-            box.textContent = '';
+            if (body) body.textContent = '';
             box.className = 'action-status';
         }}
 
@@ -1090,9 +1132,9 @@ def generate_html(
             fetchLibraryActionJson('/update-' + type + '-library')
                 .then((data) => {{
                     if (data.success) {{
-                        button.textContent = 'Success!';
+                        button.textContent = 'Sent!';
                         button.style.background = '#28a745';
-                        showLibraryActionStatus('ok', label + ' succeeded', data.message || '');
+                        showLibraryActionStatus('ok', label + ' — Kodi OK', data.message || '');
                         scheduleButtonReset(button, label, LIB_BTN_RESET_OK_MS);
                     }} else {{
                         const msg = data.message ? String(data.message) : 'Unknown error';
@@ -1123,9 +1165,9 @@ def generate_html(
             fetchLibraryActionJson(endpoint)
                 .then((data) => {{
                     if (data.success) {{
-                        button.textContent = 'Success!';
+                        button.textContent = 'Sent!';
                         button.style.background = '#28a745';
-                        showLibraryActionStatus('ok', label + ' succeeded', data.message || '');
+                        showLibraryActionStatus('ok', label + ' — Kodi OK', data.message || '');
                         scheduleButtonReset(button, label, LIB_BTN_RESET_OK_MS);
                     }} else {{
                         const msg = data.message ? String(data.message) : 'Unknown error';
@@ -1460,6 +1502,20 @@ def _parse_embedded_kodi_rpc(emb: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
+def _format_kodi_rpc_error(rpc_err: Any) -> str:
+    """Human-readable message from a Kodi JSON-RPC error object."""
+    if isinstance(rpc_err, dict):
+        msg = (rpc_err.get("message") or "").strip()
+        data = rpc_err.get("data")
+        if msg and data not in (None, ""):
+            return f"{msg} ({data})"
+        if msg:
+            return msg
+        if data not in (None, ""):
+            return str(data)
+    return str(rpc_err)
+
+
 def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
     """Create Flask web server to serve HTML statistics"""
     app = Flask(__name__)
@@ -1501,15 +1557,13 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
                 return parsed, None
         return None, "No Kodi connection selected — open the homepage and choose a server"
 
-    def _run_kodi_rpc(method: str) -> tuple[bool, str]:
-        """POST JSON-RPC to Kodi using the same endpoint resolution as KodiLibraryProbe."""
-        active, conn_err = _effective_rpc_connection()
-        if not active or not active.get("host"):
-            return False, conn_err or "No Kodi connection selected — open the homepage and choose a server"
-        probe = KodiLibraryProbe(
-            active["host"], None, active.get("username") or "", active.get("password") or ""
-        )
-        endpoint = probe.base_url
+    def _kodi_rpc_post(
+        probe: KodiLibraryProbe,
+        endpoint: str,
+        method: str,
+        read_timeout: Optional[float],
+    ) -> tuple[Optional[dict], Optional[str]]:
+        """POST JSON-RPC; read_timeout None = wait indefinitely for Kodi to finish."""
         payload = {"jsonrpc": "2.0", "method": method, "id": 1}
         response_obj = None
         try:
@@ -1518,13 +1572,12 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
                 headers={"Content-Type": "application/json"},
                 json=payload,
                 auth=probe.auth,
-                timeout=30,
+                timeout=(10, read_timeout),
             )
             response_obj.raise_for_status()
             body = response_obj.json()
         except requests.Timeout:
-            logger.error("Kodi JSON-RPC timed out method=%s endpoint=%s", method, endpoint)
-            return False, "Request timed out"
+            return None, "timeout"
         except requests.RequestException as e:
             logger.error(
                 "Kodi JSON-RPC request failed method=%s endpoint=%s: %s",
@@ -1533,7 +1586,7 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
                 e,
                 exc_info=True,
             )
-            return False, f"Request error: {str(e)}"
+            return None, f"Request error: {str(e)}"
         except ValueError:
             snippet = (response_obj.text or "")[:500] if response_obj is not None else ""
             logger.error(
@@ -1543,22 +1596,85 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
                 snippet,
                 exc_info=True,
             )
-            return False, "Invalid response from Kodi (not JSON)"
+            return None, "Invalid response from Kodi (not JSON)"
         except Exception as e:
             logger.exception("Unexpected error calling Kodi method=%s endpoint=%s", method, endpoint)
-            return False, f"Error: {str(e)}"
+            return None, f"Error: {str(e)}"
 
         rpc_err = body.get("error")
         if rpc_err:
-            logger.warning("Kodi JSON-RPC error method=%s endpoint=%s error=%s", method, endpoint, rpc_err)
-            return False, f"Kodi error: {rpc_err}"
+            err_msg = _format_kodi_rpc_error(rpc_err)
+            logger.warning(
+                "Kodi JSON-RPC error method=%s endpoint=%s error=%s",
+                method,
+                endpoint,
+                err_msg,
+            )
+            return None, err_msg
 
         if body.get("result") == "OK":
             logger.info("Kodi JSON-RPC OK method=%s endpoint=%s", method, endpoint)
-            return True, ""
+            return body, None
 
         logger.warning("Kodi unexpected response method=%s endpoint=%s body=%s", method, endpoint, body)
-        return False, f"Unexpected response: {body}"
+        return None, f"Unexpected response from Kodi: {body.get('result', body)}"
+
+    def _dispatch_kodi_library_command(
+        method: str, max_wait_s: float = 120.0
+    ) -> tuple[bool, str]:
+        """
+        Send Scan/Clean to Kodi and wait for Kodi's JSON-RPC reply.
+        Success only when Kodi returns HTTP 200 with result \"OK\" (no error field).
+        """
+        active, conn_err = _effective_rpc_connection()
+        if not active or not active.get("host"):
+            return False, conn_err or "No Kodi connection selected — open the homepage and choose a server"
+        probe = KodiLibraryProbe(
+            active["host"], None, active.get("username") or "", active.get("password") or ""
+        )
+        endpoint = probe.base_url
+        state: Dict[str, Any] = {"err": None, "finished": False}
+
+        def worker() -> None:
+            _, err = _kodi_rpc_post(probe, endpoint, method, read_timeout=None)
+            state["err"] = err
+            state["finished"] = True
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        deadline = time.time() + max_wait_s
+        while not state["finished"] and time.time() < deadline:
+            time.sleep(0.05)
+
+        if state["finished"]:
+            if state["err"]:
+                return False, state["err"]
+            return True, ""
+
+        return False, (
+            f"Kodi did not return a response within {int(max_wait_s)} seconds. "
+            "The library may be busy — check Kodi logs and try again."
+        )
+
+    def _run_kodi_rpc(method: str) -> tuple[bool, str]:
+        """POST JSON-RPC to Kodi (Scan/Clean: success only on Kodi result OK)."""
+        if method.endswith(".Scan"):
+            return _dispatch_kodi_library_command(method, max_wait_s=60.0)
+        if method.endswith(".Clean"):
+            return _dispatch_kodi_library_command(method, max_wait_s=120.0)
+        active, conn_err = _effective_rpc_connection()
+        if not active or not active.get("host"):
+            return False, conn_err or "No Kodi connection selected — open the homepage and choose a server"
+        probe = KodiLibraryProbe(
+            active["host"], None, active.get("username") or "", active.get("password") or ""
+        )
+        endpoint = probe.base_url
+        _, err = _kodi_rpc_post(probe, endpoint, method, read_timeout=30)
+        if err:
+            if err == "timeout":
+                return False, "Request timed out"
+            return False, err
+        return True, ""
 
     def build_content_html(
         stats: LibraryStats,
@@ -2580,7 +2696,10 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
         """Update video library using Kodi JSON-RPC"""
         ok, err = _run_kodi_rpc("VideoLibrary.Scan")
         if ok:
-            return jsonify({"success": True, "message": "Video library update started successfully"})
+            return jsonify({
+                "success": True,
+                "message": "Kodi returned OK — video library scan accepted",
+            })
         return jsonify({"success": False, "message": err})
     
     @app.route('/update-audio-library', methods=['POST'])
@@ -2588,7 +2707,10 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
         """Update audio library using Kodi JSON-RPC"""
         ok, err = _run_kodi_rpc("AudioLibrary.Scan")
         if ok:
-            return jsonify({"success": True, "message": "Audio library update started successfully"})
+            return jsonify({
+                "success": True,
+                "message": "Kodi returned OK — audio library scan accepted",
+            })
         return jsonify({"success": False, "message": err})
     
     @app.route('/clean-video-library', methods=['POST'])
@@ -2596,7 +2718,10 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
         """Clean video library using Kodi JSON-RPC"""
         ok, err = _run_kodi_rpc("VideoLibrary.Clean")
         if ok:
-            return jsonify({"success": True, "message": "Video library clean started successfully"})
+            return jsonify({
+                "success": True,
+                "message": "Kodi returned OK — video library clean accepted",
+            })
         return jsonify({"success": False, "message": err})
     
     @app.route('/clean-music-library', methods=['POST'])
@@ -2604,7 +2729,10 @@ def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
         """Clean music library using Kodi JSON-RPC"""
         ok, err = _run_kodi_rpc("AudioLibrary.Clean")
         if ok:
-            return jsonify({"success": True, "message": "Music library clean started successfully"})
+            return jsonify({
+                "success": True,
+                "message": "Kodi returned OK — music library clean accepted",
+            })
         return jsonify({"success": False, "message": err})
     
     print(f"🌐 Starting web server on port {web_port}")
