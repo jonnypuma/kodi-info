@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kodi Library Statistics</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Server picker -->
+    <section id="view-picker" class="panel picker-panel">
+      <div class="server-form">
+        <div class="picker-title">Choose Kodi JSON-RPC endpoint</div>
+        <label for="preset-select">Saved servers (from compose / env)</label>
+        <select id="preset-select" aria-label="Preset Kodi server"></select>
+        <p class="muted" id="preset-empty-hint" hidden>No preset servers in environment. Use custom host and port below.</p>
+        <label for="custom-host">Custom host or IP</label>
+        <div class="custom-host-wrap">
+          <input id="custom-host" type="text" placeholder="e.g. 192.168.1.50" autocomplete="off" aria-controls="custom-recent-dropdown">
+          <div id="custom-recent-dropdown" class="recent-dropdown" hidden role="listbox" aria-label="Recently used custom servers"></div>
+        </div>
+        <div class="row2">
+          <div>
+            <label for="custom-port">Port</label>
+            <input id="custom-port" type="number" min="1" max="65535" value="8080">
+          </div>
+          <div>
+            <label for="custom-scheme">Scheme</label>
+            <select id="custom-scheme">
+              <option value="http" selected>http</option>
+              <option value="https">https</option>
+            </select>
+          </div>
+        </div>
+        <label for="custom-user">Username (optional)</label>
+        <input id="custom-user" type="text" autocomplete="username">
+        <label for="custom-pass">Password (optional)</label>
+        <input id="custom-pass" type="password" autocomplete="current-password">
+        <div class="form-actions">
+          <button type="button" class="btn btn-primary" id="load-btn">Load library</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Loading -->
+    <section id="view-loading" class="panel loading-panel" hidden>
+      <div class="loader" aria-label="Loading">
+        <span>L</span><span>O</span><span>A</span><span>D</span><span>I</span><span>N</span><span>G</span>
+      </div>
+      <div id="loading-bar" class="loading-bar"><div id="loading-progress" class="loading-progress"></div></div>
+      <div id="loading-text" class="loading-text">Loading 0%</div>
+      <div id="load-error-panel" class="load-error-panel" hidden>
+        <p id="load-error-message" class="load-error-message"></p>
+        <button type="button" class="btn btn-primary" id="load-error-home-btn">Choose server again</button>
+      </div>
+    </section>
+
+    <!-- Dashboard -->
+    <section id="view-dashboard" class="dashboard" hidden>
+      <div class="container">
+        <header class="header">
+          <img src="/kodi.png" alt="Kodi Logo" class="logo">
+          <h1>Library Statistics</h1>
+          <p id="kodi-display">Connected to: —</p>
+          <p class="switch-link"><a href="#" id="switch-server-link">Switch Kodi server…</a></p>
+          <p id="last-updated">Last updated: —</p>
+          <p id="library-meta" class="library-meta"></p>
+        </header>
+
+        <div class="buttons">
+          <button id="update-video-btn" class="btn" type="button">Update Video Library</button>
+          <button id="update-audio-btn" class="btn" type="button">Update Audio Library</button>
+          <button id="clean-video-btn" class="btn" type="button">Clean Video Library</button>
+          <button id="clean-music-btn" class="btn" type="button">Clean Music Library</button>
+          <img src="/refresh.png" alt="Refresh" id="refresh-btn" class="refresh-icon" title="Refresh library (same server)">
+        </div>
+        <div id="library-action-status" class="action-status" role="status" aria-live="polite" hidden>
+          <div id="library-action-status-body" class="action-status-body"></div>
+          <button type="button" id="library-action-status-close" class="action-status-close" aria-label="Dismiss">&times;</button>
+        </div>
+
+        <div class="stats">
+          <div class="stat-column">
+            <h2><img src="/movies.png" alt=""> Movies</h2>
+            <div class="stat-card">
+              <div class="stat-number" id="stat-total-movies">0</div>
+              <div class="stat-label">Total Movies</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-number" id="stat-watched-movies">0</div>
+              <div class="stat-label">Watched Movies</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-number" id="stat-unwatched-movies">0</div>
+              <div class="stat-label">Unwatched Movies</div>
+            </div>
+            <div class="progress-block" aria-label="Movie watch progress">
+              <div class="progress-head">
+                <span>Watched</span>
+                <span id="movie-watch-pct-label">0%</span>
+              </div>
+              <div class="progress-track">
+                <div id="movie-watch-bar" class="progress-fill movies" style="width:0%"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="stat-column">
+            <h2><img src="/tv.png" alt=""> TV Shows</h2>
+            <div class="stat-card">
+              <div class="stat-number" id="stat-total-shows">0</div>
+              <div class="stat-label">Total TV Shows</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-number" id="stat-total-episodes">0</div>
+              <div class="stat-label">Total Episodes</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-number" id="stat-watched-episodes">0</div>
+              <div class="stat-label">Watched Episodes</div>
+            </div>
+            <div class="progress-block" aria-label="Episode watch progress">
+              <div class="progress-head">
+                <span>Watched</span>
+                <span id="episode-watch-pct-label">0%</span>
+              </div>
+              <div class="progress-track">
+                <div id="episode-watch-bar" class="progress-fill episodes" style="width:0%"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="stat-column">
+            <h2><img src="/music.png" alt=""> Music</h2>
+            <div class="stat-card">
+              <div class="stat-number" id="stat-total-artists">0</div>
+              <div class="stat-label">Total Artists</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-number" id="stat-total-albums">0</div>
+              <div class="stat-label">Total Albums</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-number" id="stat-total-songs">0</div>
+              <div class="stat-label">Total Songs</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="recent">
+          <div class="recent-header">
+            <h2><img src="/new.png" alt="" class="recent-icon"> Recently Added</h2>
+            <label class="recent-limit-label">
+              Show
+              <select id="recent-limit-select" aria-label="Number of recently added items">
+                <option value="5">5</option>
+                <option value="10" selected>10</option>
+                <option value="20">20</option>
+                <option value="50">50</option>
+              </select>
+            </label>
+          </div>
+          <div class="recent-grid">
+            <div class="recent-item">
+              <h3><img src="/movies.png" alt=""> Recent Movies</h3>
+              <div id="recent-movies"></div>
+            </div>
+            <div class="recent-item">
+              <h3><img src="/tv.png" alt=""> Recent Episodes</h3>
+              <div id="recent-episodes"></div>
+            </div>
+            <div class="recent-item">
+              <h3><img src="/music.png" alt=""> Recent Albums</h3>
+              <div id="recent-albums"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div id="image-overlay" class="image-overlay">
+    <img id="overlay-image" src="" alt="Artwork preview">
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,604 @@
+(() => {
+  const TOKEN_KEY = "kodiinfo_connection_token";
+  const RECENT_CUSTOM_KEY = "kodiinfo_recent_custom_v1";
+  const RECENT_CUSTOM_MAX = 10;
+  const POLL_MS = 2000;
+  const STATUS_HIDE_MS = 20000;
+  const BTN_OK_MS = 4000;
+  const BTN_ERR_MS = 12000;
+
+  let config = { presets: [], default_recent_limit: 10, recent_limit_options: [5, 10, 20, 50] };
+  let pollTimer = null;
+  let statusTimer = null;
+  let currentToken = null;
+  let loadFinished = false;
+  let loadInProgress = false;
+  let activeJobId = null;
+
+  const $ = (id) => document.getElementById(id);
+
+  function showView(name) {
+    const views = {
+      picker: $("view-picker"),
+      loading: $("view-loading"),
+      dashboard: $("view-dashboard"),
+    };
+    Object.keys(views).forEach((key) => {
+      const el = views[key];
+      if (!el) return;
+      const on = key === name;
+      el.hidden = !on;
+      // Belt-and-suspenders: some CSS can fight the hidden attribute
+      el.style.display = on ? "" : "none";
+    });
+  }
+
+  function getToken() {
+    return currentToken || sessionStorage.getItem(TOKEN_KEY) || "";
+  }
+
+  function setToken(tok) {
+    currentToken = tok || null;
+    if (tok) sessionStorage.setItem(TOKEN_KEY, tok);
+    else sessionStorage.removeItem(TOKEN_KEY);
+  }
+
+  function fmt(n) {
+    return Number(n || 0).toLocaleString();
+  }
+
+  function formatActionTime(iso) {
+    if (!iso) return "never";
+    try {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return iso;
+      return d.toLocaleString();
+    } catch (e) {
+      return iso;
+    }
+  }
+
+  function updateLibraryMeta(actions) {
+    const el = $("library-meta");
+    if (!el) return;
+    const a = actions || {};
+    el.textContent =
+      "Last video scan: " + formatActionTime(a.last_video_scan) +
+      " · Last video clean: " + formatActionTime(a.last_video_clean) +
+      " · Last audio scan: " + formatActionTime(a.last_audio_scan) +
+      " · Last music clean: " + formatActionTime(a.last_music_clean);
+  }
+
+  function setProgressBars(stats) {
+    const mp = Math.max(0, Math.min(100, Number(stats.movie_watch_pct || 0)));
+    const ep = Math.max(0, Math.min(100, Number(stats.episode_watch_pct || 0)));
+    $("movie-watch-bar").style.width = mp + "%";
+    $("episode-watch-bar").style.width = ep + "%";
+    $("movie-watch-pct-label").textContent = mp.toFixed(1) + "%";
+    $("episode-watch-pct-label").textContent = ep.toFixed(1) + "%";
+  }
+
+  function renderRecentList(containerId, items, cssClass) {
+    const box = $(containerId);
+    if (!box) return;
+    box.innerHTML = "";
+    (items || []).forEach((item) => {
+      const row = document.createElement("div");
+      row.className = "recent-entry";
+      let media;
+      if (item.image) {
+        media = document.createElement("img");
+        media.src = item.image;
+        media.alt = item.title || "";
+        media.className = cssClass + " zoomable";
+      } else {
+        media = document.createElement("div");
+        media.className = "no-image";
+        media.textContent = item.icon || "•";
+      }
+      const content = document.createElement("div");
+      content.className = "content";
+      const title = document.createElement("div");
+      title.className = "title";
+      title.textContent = item.title || "";
+      content.appendChild(title);
+      if (item.subtitle) {
+        const sub = document.createElement("div");
+        sub.className = "subtitle";
+        sub.textContent = item.subtitle;
+        content.appendChild(sub);
+      }
+      if (item.date) {
+        const date = document.createElement("div");
+        date.className = "date";
+        date.textContent = item.date;
+        content.appendChild(date);
+      }
+      row.appendChild(media);
+      row.appendChild(content);
+      box.appendChild(row);
+    });
+    bindZoom();
+  }
+
+  function renderDashboard(data) {
+    loadInProgress = false;
+    const loadBtn = $("load-btn");
+    if (loadBtn) loadBtn.disabled = false;
+    const stats = data.stats || {};
+    $("kodi-display").textContent = "Connected to: " + (data.kodi_display || "—");
+    $("last-updated").textContent = "Last updated: " + (data.last_updated || "—");
+    updateLibraryMeta(data.library_actions);
+
+    $("stat-total-movies").textContent = fmt(stats.total_movies);
+    $("stat-watched-movies").textContent = fmt(stats.watched_movies);
+    $("stat-unwatched-movies").textContent = fmt(
+      Math.max(0, (stats.total_movies || 0) - (stats.watched_movies || 0))
+    );
+    $("stat-total-shows").textContent = fmt(stats.total_tv_shows);
+    $("stat-total-episodes").textContent = fmt(stats.total_episodes);
+    $("stat-watched-episodes").textContent = fmt(stats.watched_episodes);
+    $("stat-total-artists").textContent = fmt(stats.total_artists);
+    $("stat-total-albums").textContent = fmt(stats.total_albums);
+    $("stat-total-songs").textContent = fmt(stats.total_songs);
+    setProgressBars(stats);
+
+    const limit = stats.recent_limit || data.recent_limit || config.default_recent_limit || 10;
+    const sel = $("recent-limit-select");
+    if (sel) sel.value = String(limit);
+
+    const recent = stats.recently_added || {};
+    renderRecentList("recent-movies", recent.movies, "movie-poster");
+    renderRecentList("recent-episodes", recent.episodes, "episode-thumb");
+    renderRecentList("recent-albums", recent.albums, "album-cover");
+    showView("dashboard");
+  }
+
+  function bindZoom() {
+    const overlay = $("image-overlay");
+    const overlayImg = $("overlay-image");
+    document.querySelectorAll(".zoomable").forEach((img) => {
+      if (img.dataset.zoomBound) return;
+      img.dataset.zoomBound = "1";
+      img.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        overlay.classList.toggle("episode-zoom", img.classList.contains("episode-thumb"));
+        overlayImg.src = img.src;
+        overlay.classList.add("visible");
+      });
+    });
+  }
+
+  function updateLoading(progress, message) {
+    const pct = Math.min(100, Math.max(0, Math.round(progress || 0)));
+    $("loading-progress").style.width = pct + "%";
+    $("loading-text").textContent = (message || "Loading") + " " + pct + "%";
+  }
+
+  function showLoadError(msg) {
+    loadFinished = true;
+    loadInProgress = false;
+    stopPolling();
+    const loadBtn = $("load-btn");
+    if (loadBtn) loadBtn.disabled = false;
+    const loader = document.querySelector("#view-loading .loader");
+    if (loader) loader.style.display = "none";
+    const bar = $("loading-bar");
+    if (bar) bar.style.display = "none";
+    $("loading-text").hidden = true;
+    $("load-error-panel").hidden = false;
+    $("load-error-message").textContent = msg || "Could not load library.";
+    showView("loading");
+  }
+
+  function resetLoadError() {
+    const loader = document.querySelector("#view-loading .loader");
+    if (loader) loader.style.display = "";
+    const bar = document.querySelector("#view-loading .loading-bar");
+    if (bar) bar.style.display = "";
+    $("loading-text").hidden = false;
+    $("load-error-panel").hidden = true;
+    $("load-error-message").textContent = "";
+  }
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  async function pollJob(jobId) {
+    stopPolling();
+    activeJobId = jobId;
+    const tick = async () => {
+      if (loadFinished || activeJobId !== jobId) return;
+      try {
+        const res = await fetch("/api/load-status/" + jobId);
+        if (res.status === 404) {
+          loadInProgress = false;
+          showLoadError("Loading job missing — choose a server and try again.");
+          return;
+        }
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+        updateLoading(data.progress || 0, data.message || "Loading");
+        if (data.status === "done") {
+          loadFinished = true;
+          stopPolling();
+          try {
+            const dash = await fetch("/api/dashboard/" + jobId);
+            const body = await dash.json();
+            if (!dash.ok || !body.success) {
+              loadInProgress = false;
+              showLoadError((body && body.message) || "Failed to load dashboard");
+              return;
+            }
+            if (body.data.connection_token) setToken(body.data.connection_token);
+            loadInProgress = false;
+            renderDashboard(body.data);
+          } catch (dashErr) {
+            loadInProgress = false;
+            showLoadError(
+              (dashErr && dashErr.message) || "Failed to load dashboard data"
+            );
+          }
+          return;
+        }
+        if (data.status === "error") {
+          loadInProgress = false;
+          showLoadError(data.message || "Error loading");
+        }
+      } catch (e) {
+        /* transient poll failure — keep trying */
+      }
+    };
+    await tick();
+    if (!loadFinished && activeJobId === jobId) {
+      pollTimer = setInterval(tick, POLL_MS);
+    }
+  }
+
+  async function startLoad(body) {
+    if (loadInProgress) return;
+    loadInProgress = true;
+    resetLoadError();
+    loadFinished = false;
+    stopPolling();
+    activeJobId = null;
+    showView("loading");
+    updateLoading(0, "Starting");
+    const loadBtn = $("load-btn");
+    if (loadBtn) loadBtn.disabled = true;
+    try {
+      const res = await fetch("/api/start-load", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const text = await res.text();
+      let data = {};
+      try { data = text ? JSON.parse(text) : {}; } catch (e) {}
+      if (!res.ok) {
+        loadInProgress = false;
+        if (loadBtn) loadBtn.disabled = false;
+        showLoadError((data && data.message) || text || ("HTTP " + res.status));
+        return;
+      }
+      if (data.connection_token) setToken(data.connection_token);
+      await pollJob(data.job_id);
+    } catch (e) {
+      loadInProgress = false;
+      if (loadBtn) loadBtn.disabled = false;
+      showLoadError((e && e.message) || String(e));
+    }
+  }
+
+  function buildPickerPayload() {
+    const sel = $("preset-select");
+    const val = sel ? sel.value : "custom";
+    const recentLimit = Number(($("recent-limit-select") && $("recent-limit-select").value) || config.default_recent_limit || 10);
+    if (val === "custom") {
+      return {
+        custom: true,
+        host: ($("custom-host") && $("custom-host").value) || "",
+        port: ($("custom-port") && $("custom-port").value) || 8080,
+        scheme: ($("custom-scheme") && $("custom-scheme").value) || "http",
+        username: ($("custom-user") && $("custom-user").value) || "",
+        password: ($("custom-pass") && $("custom-pass").value) || "",
+        recent_limit: recentLimit,
+      };
+    }
+    return { preset: val, recent_limit: recentLimit };
+  }
+
+  function recentCustomLoad() {
+    try {
+      const raw = localStorage.getItem(RECENT_CUSTOM_KEY);
+      const arr = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? arr.slice(0, RECENT_CUSTOM_MAX) : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function recentCustomSave(body) {
+    if (!body || !body.custom) return;
+    const host = String(body.host || "").trim();
+    if (!host) return;
+    let port = parseInt(body.port, 10);
+    if (!Number.isFinite(port)) port = 8080;
+    const scheme = String(body.scheme || "http").toLowerCase() === "https" ? "https" : "http";
+    const username = String(body.username || "").trim();
+    const entry = { h: host, p: port, s: scheme, u: username };
+    try {
+      let list = recentCustomLoad().filter(
+        (e) => !(e.h.toLowerCase() === host.toLowerCase() && e.p === port && e.s === scheme && e.u === username)
+      );
+      list.unshift(entry);
+      localStorage.setItem(RECENT_CUSTOM_KEY, JSON.stringify(list.slice(0, RECENT_CUSTOM_MAX)));
+    } catch (e) {}
+  }
+
+  function refreshRecentDropdown() {
+    const box = $("custom-recent-dropdown");
+    if (!box) return;
+    const list = recentCustomLoad();
+    box.innerHTML = "";
+    if (!list.length) {
+      box.hidden = true;
+      return;
+    }
+    const hdr = document.createElement("div");
+    hdr.className = "recent-dropdown-header";
+    hdr.textContent = "Recent (this browser)";
+    box.appendChild(hdr);
+    list.forEach((e) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "recent-dropdown-item";
+      btn.textContent = e.h + ":" + e.p + " (" + e.s + ")" + (e.u ? " · " + e.u : "");
+      btn.addEventListener("click", () => {
+        $("custom-host").value = e.h;
+        $("custom-port").value = String(e.p);
+        $("custom-scheme").value = e.s;
+        $("custom-user").value = e.u || "";
+        $("custom-pass").value = "";
+        box.hidden = true;
+        const sel = $("preset-select");
+        if (sel) sel.value = "custom";
+      });
+      box.appendChild(btn);
+    });
+  }
+
+  function populatePresets() {
+    const sel = $("preset-select");
+    const emptyHint = $("preset-empty-hint");
+    const presets = config.presets || [];
+    sel.innerHTML = "";
+    if (!presets.length) {
+      emptyHint.hidden = false;
+      const opt = document.createElement("option");
+      opt.value = "custom";
+      opt.textContent = "Custom (manual host / port)";
+      sel.appendChild(opt);
+      sel.value = "custom";
+      return;
+    }
+    emptyHint.hidden = true;
+    presets.forEach((p) => {
+      const opt = document.createElement("option");
+      opt.value = String(p.id);
+      opt.textContent = (p.label || ("Server " + p.id)) + (p.host ? " — " + p.host : "");
+      sel.appendChild(opt);
+    });
+    const custom = document.createElement("option");
+    custom.value = "custom";
+    custom.textContent = "Custom (manual host / port)";
+    sel.appendChild(custom);
+    sel.value = String(presets[0].id);
+  }
+
+  function clearStatus() {
+    if (statusTimer) {
+      clearTimeout(statusTimer);
+      statusTimer = null;
+    }
+    const box = $("library-action-status");
+    const body = $("library-action-status-body");
+    if (!box) return;
+    box.hidden = true;
+    if (body) body.textContent = "";
+    box.className = "action-status";
+  }
+
+  function showStatus(level, summary, detail) {
+    const box = $("library-action-status");
+    const body = $("library-action-status-body");
+    if (!box || !body) return;
+    if (statusTimer) clearTimeout(statusTimer);
+    body.textContent =
+      "[" + new Date().toLocaleTimeString() + "] " + summary + (detail ? "\n" + detail : "");
+    box.hidden = false;
+    box.className = "action-status visible " + (level === "ok" ? "ok" : "err");
+    statusTimer = setTimeout(clearStatus, STATUS_HIDE_MS);
+  }
+
+  async function libraryAction(endpoint, label, button) {
+    clearStatus();
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = "Working…";
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Connection-Token": getToken(),
+        },
+        body: JSON.stringify({ connection_token: getToken() }),
+      });
+      const text = await res.text();
+      let data = {};
+      try { data = text ? JSON.parse(text) : {}; } catch (e) {}
+      if (!res.ok || !data.success) {
+        throw new Error((data && data.message) || ("HTTP " + res.status));
+      }
+      button.textContent = "Sent!";
+      button.style.background = "#28a745";
+      showStatus("ok", label + " — Kodi OK", data.message || "");
+      if (data.library_actions) updateLibraryMeta(data.library_actions);
+      setTimeout(() => {
+        button.disabled = false;
+        button.textContent = original;
+        button.style.background = "";
+      }, BTN_OK_MS);
+    } catch (err) {
+      button.textContent = "Failed — details below";
+      button.style.background = "#dc3545";
+      showStatus("err", label + " failed", (err && err.message) || String(err));
+      setTimeout(() => {
+        button.disabled = false;
+        button.textContent = original;
+        button.style.background = "";
+      }, BTN_ERR_MS);
+    }
+  }
+
+  async function refreshDashboard() {
+    const tok = getToken();
+    if (!tok) {
+      showView("picker");
+      return;
+    }
+    const recentLimit = Number(($("recent-limit-select") && $("recent-limit-select").value) || config.default_recent_limit || 10);
+    await startLoad({ connection_token: tok, recent_limit: recentLimit });
+  }
+
+  async function changeRecentLimit() {
+    const tok = getToken();
+    if (!tok) return;
+    const limit = Number($("recent-limit-select").value || 10);
+    try {
+      const res = await fetch("/api/recent", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Connection-Token": tok,
+        },
+        body: JSON.stringify({ connection_token: tok, recent_limit: limit }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.message || "Failed");
+      renderRecentList("recent-movies", data.recently_added.movies, "movie-poster");
+      renderRecentList("recent-episodes", data.recently_added.episodes, "episode-thumb");
+      renderRecentList("recent-albums", data.recently_added.albums, "album-cover");
+    } catch (e) {
+      showStatus("err", "Could not update recently added", (e && e.message) || String(e));
+    }
+  }
+
+  async function init() {
+    try {
+      const res = await fetch("/api/config");
+      config = await res.json();
+    } catch (e) {
+      config = { presets: [], default_recent_limit: 10, recent_limit_options: [5, 10, 20, 50] };
+    }
+    populatePresets();
+    const sel = $("recent-limit-select");
+    if (sel && config.default_recent_limit) sel.value = String(config.default_recent_limit);
+
+    $("load-btn").addEventListener("click", async () => {
+      if (loadInProgress) return;
+      const body = buildPickerPayload();
+      recentCustomSave(body);
+      try {
+        await startLoad(body);
+      } catch (e) {
+        loadInProgress = false;
+        showLoadError((e && e.message) || String(e));
+      }
+    });
+    $("load-error-home-btn").addEventListener("click", () => {
+      resetLoadError();
+      loadInProgress = false;
+      const loadBtn = $("load-btn");
+      if (loadBtn) loadBtn.disabled = false;
+      showView("picker");
+    });
+    $("switch-server-link").addEventListener("click", (e) => {
+      e.preventDefault();
+      loadInProgress = false;
+      stopPolling();
+      const loadBtn = $("load-btn");
+      if (loadBtn) loadBtn.disabled = false;
+      showView("picker");
+    });
+    $("refresh-btn").addEventListener("click", () => refreshDashboard());
+    $("update-video-btn").addEventListener("click", () =>
+      libraryAction("/api/update-video-library", "Update Video Library", $("update-video-btn"))
+    );
+    $("update-audio-btn").addEventListener("click", () =>
+      libraryAction("/api/update-audio-library", "Update Audio Library", $("update-audio-btn"))
+    );
+    $("clean-video-btn").addEventListener("click", () =>
+      libraryAction("/api/clean-video-library", "Clean Video Library", $("clean-video-btn"))
+    );
+    $("clean-music-btn").addEventListener("click", () =>
+      libraryAction("/api/clean-music-library", "Clean Music Library", $("clean-music-btn"))
+    );
+    $("library-action-status-close").addEventListener("click", clearStatus);
+    $("recent-limit-select").addEventListener("change", changeRecentLimit);
+
+    const hostEl = $("custom-host");
+    const wrap = document.querySelector(".custom-host-wrap");
+    const dd = $("custom-recent-dropdown");
+    if (hostEl && wrap && dd) {
+      hostEl.addEventListener("focus", () => {
+        refreshRecentDropdown();
+        dd.hidden = recentCustomLoad().length === 0;
+      });
+      hostEl.addEventListener("keydown", (ev) => {
+        if (ev.key === "Escape") dd.hidden = true;
+      });
+      wrap.addEventListener("focusout", () => {
+        setTimeout(() => {
+          if (!wrap.matches(":focus-within")) dd.hidden = true;
+        }, 0);
+      });
+    }
+
+    const overlay = $("image-overlay");
+    overlay.addEventListener("click", () => {
+      overlay.classList.remove("visible", "episode-zoom");
+      $("overlay-image").src = "";
+    });
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape" && overlay.classList.contains("visible")) {
+        overlay.classList.remove("visible", "episode-zoom");
+        $("overlay-image").src = "";
+      }
+    });
+
+    // 24h auto-refresh
+    setTimeout(() => {
+      if (getToken()) refreshDashboard();
+    }, 24 * 60 * 60 * 1000);
+
+    // Hash #reload uses stored token
+    if (location.hash === "#reload" && getToken()) {
+      history.replaceState(null, "", location.pathname);
+      await refreshDashboard();
+      return;
+    }
+
+    showView("picker");
+  }
+
+  init();
+})();

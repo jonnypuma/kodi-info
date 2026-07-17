@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   kodi-info:
-    build: ./kodiinfo
+    build: .
     container_name: kodi-info
     image: kodi-info
     restart: unless-stopped
@@ -27,17 +27,17 @@ services:
       - KODI_PASSWORD_3=${KODI_PASSWORD_3:-}
       - KODI_LABEL_3=${KODI_LABEL_3:-}
       # Same pattern for slots 4–10: KODI_HOST_4 … KODI_LABEL_4, etc.
-      # Signed session cookie used for Scan/Clean RPC (set in production stacks)
+      #
+      # REQUIRED in production: stable secret so sessions survive restarts.
+      # Generate once: python -c "import secrets; print(secrets.token_hex(32))"
+      # If unset, the app uses a random key per process (fine for testing only).
       - WEB_SECRET_KEY=${WEB_SECRET_KEY:-}
-      # Web server settings
+      # Default recently-added count (UI dropdown can still pick 5/10/20/50)
+      - RECENT_LIMIT=${RECENT_LIMIT:-10}
       - WEB_PORT=5005
     env_file:
       - ./.env
-    # Uncomment only if the container cannot resolve a LAN hostname and you must pin it:
-    # extra_hosts:
-    #   - "kodiLivingRoom:192.168.0.50"
     volumes:
-      # Optional: Mount output directory for HTML files
       - ./output:/app/output
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5005/health"]
