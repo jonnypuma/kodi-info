@@ -1,7 +1,11 @@
 (() => {
   const TOKEN_KEY = "kodiinfo_connection_token";
+  const TOKEN_MAP_KEY = "kodiinfo_server_tokens_v1";
   const RECENT_CUSTOM_KEY = "kodiinfo_recent_custom_v1";
   const RECENT_CUSTOM_MAX = 10;
+  const CACHE_DB = "kodiinfo_dashboard_cache";
+  const CACHE_STORE = "dashboards";
+  const CACHE_TTL_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
   const POLL_MS = 2000;
   const STATUS_HIDE_MS = 20000;
   const BTN_OK_MS = 4000;
@@ -11,6 +15,7 @@
   let pollTimer = null;
   let statusTimer = null;
   let currentToken = null;
+  let currentCacheKey = null;
   let loadFinished = false;
   let loadInProgress = false;
   let activeJobId = null;
@@ -28,7 +33,6 @@
       if (!el) return;
       const on = key === name;
       el.hidden = !on;
-      // Belt-and-suspenders: some CSS can fight the hidden attribute
       el.style.display = on ? "" : "none";
     });
   }
@@ -41,6 +45,141 @@
     currentToken = tok || null;
     if (tok) sessionStorage.setItem(TOKEN_KEY, tok);
     else sessionStorage.removeItem(TOKEN_KEY);
+  }
+
+  function readTokenMap() {
+    try {
+      const raw = sessionStorage.getItem(TOKEN_MAP_KEY);
+      const obj = raw ? JSON.parse(raw) : {};
+      return obj && typeof obj === "object" ? obj : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function rememberTokenForKey(cacheKey, tok) {
+    if (!cacheKey || !tok) return;
+    try {
+      const map = readTokenMap();
+      map[cacheKey] = tok;
+      sessionStorage.setItem(TOKEN_MAP_KEY, JSON.stringify(map));
+    } catch (e) {}
+  }
+
+  function tokenForKey(cacheKey) {
+    if (!cacheKey) return "";
+    const map = readTokenMap();
+    return map[cacheKey] || "";
+  }
+
+  function makeCacheKey(body) {
+    if (!body || typeof body !== "object") return null;
+    if (body.custom) {
+      const host = String(body.host || "").trim().toLowerCase();
+      if (!host) return null;
+      let port = parseInt(body.port, 10);
+      if (!Number.isFinite(port)) port = 8080;
+      const scheme = String(body.scheme || "http").toLowerCase() === "https" ? "https" : "http";
+      return "custom:" + scheme + "://" + host + ":" + port;
+    }
+    if (body.preset != null && String(body.preset).trim() !== "" && String(body.preset) !== "custom") {
+      return "preset:" + String(body.preset).trim();
+    }
+    if (body.connection_token && currentCacheKey) return currentCacheKey;
+    return null;
+  }
+
+  function openCacheDb() {
+    return new Promise((resolve, reject) => {
+      if (!window.indexedDB) {
+        reject(new Error("no indexedDB"));
+        return;
+      }
+      const req = indexedDB.open(CACHE_DB, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(CACHE_STORE)) {
+          db.createObjectStore(CACHE_STORE, { keyPath: "cacheKey" });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error("idb open failed"));
+    });
+  }
+
+  async function cacheGet(cacheKey) {
+    if (!cacheKey) return null;
+    try {
+      const db = await openCacheDb();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(CACHE_STORE, "readonly");
+        const req = tx.objectStore(CACHE_STORE).get(cacheKey);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      });
+    } catch (e) {
+      try {
+        const raw = localStorage.getItem(CACHE_DB + ":" + cacheKey);
+        return raw ? JSON.parse(raw) : null;
+      } catch (e2) {
+        return null;
+      }
+    }
+  }
+
+  async function cacheSet(cacheKey, data) {
+    if (!cacheKey || !data) return;
+    const safe = JSON.parse(JSON.stringify(data));
+    delete safe.connection_token;
+    delete safe.fromCache;
+    delete safe.cachedAt;
+    const entry = { cacheKey, cachedAt: Date.now(), data: safe };
+    try {
+      const db = await openCacheDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(CACHE_STORE, "readwrite");
+        tx.objectStore(CACHE_STORE).put(entry);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) {
+      try {
+        localStorage.setItem(CACHE_DB + ":" + cacheKey, JSON.stringify(entry));
+      } catch (e2) {}
+    }
+  }
+
+  async function cacheDelete(cacheKey) {
+    if (!cacheKey) return;
+    try {
+      const db = await openCacheDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(CACHE_STORE, "readwrite");
+        tx.objectStore(CACHE_STORE).delete(cacheKey);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) {
+      try {
+        localStorage.removeItem(CACHE_DB + ":" + cacheKey);
+      } catch (e2) {}
+    }
+  }
+
+  function cacheIsFresh(entry) {
+    if (!entry || !entry.cachedAt || !entry.data) return false;
+    return Date.now() - Number(entry.cachedAt) < CACHE_TTL_MS;
+  }
+
+  function formatCacheAge(cachedAt) {
+    const ageMs = Math.max(0, Date.now() - Number(cachedAt || 0));
+    const mins = Math.floor(ageMs / 60000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return mins + "m ago";
+    const hours = Math.floor(mins / 60);
+    if (hours < 48) return hours + "h ago";
+    const days = Math.floor(hours / 24);
+    return days + "d ago";
   }
 
   function fmt(n) {
@@ -121,13 +260,19 @@
     bindZoom();
   }
 
-  function renderDashboard(data) {
+  function renderDashboard(data, opts) {
+    opts = opts || {};
     loadInProgress = false;
     const loadBtn = $("load-btn");
     if (loadBtn) loadBtn.disabled = false;
+    if (opts.cacheKey) currentCacheKey = opts.cacheKey;
     const stats = data.stats || {};
     $("kodi-display").textContent = "Connected to: " + (data.kodi_display || "—");
-    $("last-updated").textContent = "Last updated: " + (data.last_updated || "—");
+    let updated = "Last updated: " + (data.last_updated || "—");
+    if (opts.fromCache) {
+      updated += " · cached (" + formatCacheAge(opts.cachedAt) + ", max 3d)";
+    }
+    $("last-updated").textContent = updated;
     updateLibraryMeta(data.library_actions);
 
     $("stat-total-movies").textContent = fmt(stats.total_movies);
@@ -234,9 +379,15 @@
               showLoadError((body && body.message) || "Failed to load dashboard");
               return;
             }
-            if (body.data.connection_token) setToken(body.data.connection_token);
+            if (body.data.connection_token) {
+              setToken(body.data.connection_token);
+              if (currentCacheKey) rememberTokenForKey(currentCacheKey, body.data.connection_token);
+            }
             loadInProgress = false;
-            renderDashboard(body.data);
+            renderDashboard(body.data, { cacheKey: currentCacheKey, fromCache: false });
+            if (currentCacheKey) {
+              cacheSet(currentCacheKey, body.data).catch(() => {});
+            }
           } catch (dashErr) {
             loadInProgress = false;
             showLoadError(
@@ -259,8 +410,71 @@
     }
   }
 
-  async function startLoad(body) {
+  async function ensureConnection(body, cacheKey) {
+    const payload = Object.assign({}, body || {});
+    const mapped = tokenForKey(cacheKey) || getToken();
+    if (mapped && !payload.connection_token && !payload.custom && !payload.preset) {
+      payload.connection_token = mapped;
+    } else if (mapped && !payload.password) {
+      // Prefer remembered token when reopening a custom server without retyping password
+      payload.connection_token = mapped;
+    }
+    try {
+      const res = await fetch("/api/ensure-connection", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        return { ok: false, message: (data && data.message) || ("HTTP " + res.status) };
+      }
+      if (data.connection_token) {
+        setToken(data.connection_token);
+        if (cacheKey) rememberTokenForKey(cacheKey, data.connection_token);
+      }
+      return { ok: true, token: data.connection_token };
+    } catch (e) {
+      return { ok: false, message: (e && e.message) || String(e) };
+    }
+  }
+
+  async function startLoad(body, opts) {
+    opts = opts || {};
+    const forceRefresh = !!opts.forceRefresh;
     if (loadInProgress) return;
+    const cacheKey = makeCacheKey(body);
+    if (cacheKey) currentCacheKey = cacheKey;
+
+    if (!forceRefresh && cacheKey) {
+      const entry = await cacheGet(cacheKey);
+      if (cacheIsFresh(entry)) {
+        const mappedTok = tokenForKey(cacheKey);
+        if (mappedTok) setToken(mappedTok);
+        renderDashboard(entry.data, {
+          cacheKey,
+          fromCache: true,
+          cachedAt: entry.cachedAt,
+        });
+        // Refresh opaque token in background so Scan/Clean/Refresh still work
+        ensureConnection(body, cacheKey).then((r) => {
+          if (!r.ok) {
+            showStatus(
+              "err",
+              "Cached library shown",
+              "Could not refresh connection for actions: " + (r.message || "unknown error")
+            );
+          }
+        });
+        return;
+      }
+    }
+
+    if (forceRefresh && cacheKey) {
+      await cacheDelete(cacheKey);
+    }
+
     loadInProgress = true;
     resetLoadError();
     loadFinished = false;
@@ -286,7 +500,10 @@
         showLoadError((data && data.message) || text || ("HTTP " + res.status));
         return;
       }
-      if (data.connection_token) setToken(data.connection_token);
+      if (data.connection_token) {
+        setToken(data.connection_token);
+        if (cacheKey) rememberTokenForKey(cacheKey, data.connection_token);
+      }
       await pollJob(data.job_id);
     } catch (e) {
       loadInProgress = false;
@@ -450,7 +667,16 @@
       button.textContent = "Sent!";
       button.style.background = "#28a745";
       showStatus("ok", label + " — Kodi OK", data.message || "");
-      if (data.library_actions) updateLibraryMeta(data.library_actions);
+      if (data.library_actions) {
+        updateLibraryMeta(data.library_actions);
+        if (currentCacheKey) {
+          cacheGet(currentCacheKey).then((entry) => {
+            if (!entry || !entry.data) return;
+            entry.data.library_actions = data.library_actions;
+            cacheSet(currentCacheKey, entry.data).catch(() => {});
+          });
+        }
+      }
       setTimeout(() => {
         button.disabled = false;
         button.textContent = original;
@@ -475,7 +701,10 @@
       return;
     }
     const recentLimit = Number(($("recent-limit-select") && $("recent-limit-select").value) || config.default_recent_limit || 10);
-    await startLoad({ connection_token: tok, recent_limit: recentLimit });
+    await startLoad(
+      { connection_token: tok, recent_limit: recentLimit },
+      { forceRefresh: true }
+    );
   }
 
   async function changeRecentLimit() {
@@ -497,6 +726,15 @@
       renderRecentList("recent-movies", data.recently_added.movies, "movie-poster");
       renderRecentList("recent-episodes", data.recently_added.episodes, "episode-thumb");
       renderRecentList("recent-albums", data.recently_added.albums, "album-cover");
+      if (currentCacheKey) {
+        const entry = await cacheGet(currentCacheKey);
+        if (entry && entry.data && entry.data.stats) {
+          entry.data.stats.recently_added = data.recently_added;
+          entry.data.stats.recent_limit = limit;
+          entry.data.recent_limit = limit;
+          await cacheSet(currentCacheKey, entry.data);
+        }
+      }
     } catch (e) {
       showStatus("err", "Could not update recently added", (e && e.message) || String(e));
     }

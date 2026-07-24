@@ -324,6 +324,52 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
         payload = [{"id": p["id"], "label": p["label"], "host": p["host"]} for p in preset_servers]
         return jsonify({"servers": payload})
 
+    @app.route("/api/ensure-connection", methods=["POST"])
+    def api_ensure_connection():
+        """
+        Issue/refresh an opaque connection token without loading the library.
+        Used when serving a cached dashboard so Scan/Clean/Refresh still work.
+        """
+        data = request.get_json(silent=True) or {}
+        tok = (data.get("connection_token") or "").strip()
+        if tok:
+            conn = connection_tokens.get_connection(tok)
+            if conn and conn.get("host"):
+                connection_tokens.touch(tok)
+                session["connection_token"] = tok
+                session.permanent = True
+                session.modified = True
+                return jsonify(
+                    {
+                        "success": True,
+                        "connection_token": tok,
+                        "host": conn.get("host"),
+                        "label": conn.get("label") or "",
+                    }
+                )
+
+        conn, err = resolve_start_load_connection(data, preset_servers)
+        if err or not conn:
+            return jsonify({"success": False, "message": err or "Unable to resolve Kodi connection"}), 400
+
+        token = connection_tokens.issue_token(dict(conn))
+        session["connection_token"] = token
+        session["kodi_connection"] = {
+            "host": conn["host"],
+            "label": conn.get("label") or "",
+            "preset_id": conn.get("preset_id"),
+        }
+        session.permanent = True
+        session.modified = True
+        return jsonify(
+            {
+                "success": True,
+                "connection_token": token,
+                "host": conn["host"],
+                "label": conn.get("label") or "",
+            }
+        )
+
     @app.route("/api/start-load", methods=["POST"])
     def api_start_load():
         data = request.get_json(silent=True) or {}
