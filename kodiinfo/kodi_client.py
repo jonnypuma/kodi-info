@@ -5,12 +5,15 @@ Kodi Client Module
 Provides classes and functions for connecting to and querying Kodi servers via JSON-RPC.
 """
 
+import logging
 import os
 import requests
 import hashlib
 from typing import Dict, Any, Optional, List, Tuple, Callable
 from dataclasses import dataclass
 from urllib.parse import urlparse, unquote
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -105,6 +108,7 @@ class KodiLibraryProbe:
         self.auth = (self.username, self.password) if self.username and self.password else None
         self.headers = {"Content-Type": "application/json"}
         self.last_error = ""
+        self.kodi_version = ""
         
     def connect(self) -> bool:
         """
@@ -130,16 +134,24 @@ class KodiLibraryProbe:
             
             if "result" in result and "version" in result["result"]:
                 version = result["result"]["version"]
-                print(f"✓ Connected to Kodi {version['major']}.{version['minor']}")
+                self.kodi_version = ".".join(
+                    str(version.get(key)) for key in ("major", "minor", "tag")
+                    if version.get(key) not in (None, "")
+                )
+                logger.info(
+                    "Connected to Kodi %s.%s at %s",
+                    version.get("major"),
+                    version.get("minor"),
+                    self.base_url,
+                )
                 return True
             else:
-                print(f"✗ Unexpected response format: {result}")
+                logger.warning("Unexpected Kodi connect response from %s: %s", self.base_url, result)
                 self.last_error = f"Unexpected response from Kodi at {self.base_url}"
                 return False
             
         except Exception as e:
-            print(f"✗ Failed to connect to Kodi at {self.base_url}")
-            print(f"  Error: {str(e)}")
+            logger.warning("Failed to connect to Kodi at %s: %s", self.base_url, e)
             err_text = str(e)
             if "401" in err_text and self.auth is None:
                 self.last_error = (
@@ -177,6 +189,10 @@ class KodiLibraryProbe:
             
             if "result" in result and "version" in result["result"]:
                 version = result["result"]["version"]
+                self.kodi_version = ".".join(
+                    str(version.get(key)) for key in ("major", "minor", "tag")
+                    if version.get(key) not in (None, "")
+                )
                 version_str = f"Kodi {version['major']}.{version['minor']}"
                 return True, version_str
             else:
@@ -200,7 +216,7 @@ class KodiLibraryProbe:
             result = response.json()
             return result
         except Exception as e:
-            print(f"✗ RPC request failed for {method}: {str(e)}")
+            logger.warning("RPC request failed for %s at %s: %s", method, self.base_url, e)
             return {}
     
     def get_movie_statistics(self) -> tuple[int, int]:
@@ -211,7 +227,7 @@ class KodiLibraryProbe:
             Tuple of (total_movies, watched_movies)
         """
         try:
-            print("📽️  Fetching movie statistics...")
+            logger.debug("Fetching movie statistics from %s", self.base_url)
             result = self._make_request("VideoLibrary.GetMovies", {
                 "properties": ["playcount"],
                 "limits": {"start": 0, "end": 100000}
@@ -230,7 +246,7 @@ class KodiLibraryProbe:
             return total_movies, watched_movies
             
         except Exception as e:
-            print(f"  ⚠️  Error fetching movie statistics: {str(e)}")
+            logger.warning("Error fetching movie statistics from %s: %s", self.base_url, e)
             return 0, 0
     
     def get_tv_statistics(self) -> tuple[int, int, int]:
@@ -241,7 +257,7 @@ class KodiLibraryProbe:
             Tuple of (total_tv_shows, total_episodes, watched_episodes)
         """
         try:
-            print("📺  Fetching TV show statistics...")
+            logger.debug("Fetching TV show statistics from %s", self.base_url)
             
             # Get TV shows
             tv_shows_result = self._make_request("VideoLibrary.GetTVShows", {
@@ -266,9 +282,13 @@ class KodiLibraryProbe:
                 watched_episodes = int(statistics.get("episode.watched", 0) or 0)
                 if total_episodes <= 0:
                     total_episodes = int(statistics.get("episode", 0) or 0)
-                print(f"📺 Global episodes: {total_episodes}; watched (GetStatistics): {watched_episodes}")
+                logger.debug(
+                    "TV stats via GetStatistics: episodes=%s watched=%s",
+                    total_episodes,
+                    watched_episodes,
+                )
             elif total_episodes > 0:
-                print("📺 GetStatistics missing — paginating playcounts for watched…")
+                logger.debug("GetStatistics missing — paginating playcounts for watched episodes")
                 watched_episodes, scan_total = _watched_episodes_paginated(self)
                 if total_episodes <= 0 and scan_total > 0:
                     total_episodes = scan_total
@@ -286,17 +306,21 @@ class KodiLibraryProbe:
                 watched_episodes = sum(
                     1 for episode in episodes if episode.get("playcount", 0) > 0
                 )
-                print(f"📺 Fallback GetEpisodes batch: total={total_episodes} watched={watched_episodes}")
+                logger.debug(
+                    "TV stats via GetEpisodes batch: total=%s watched=%s",
+                    total_episodes,
+                    watched_episodes,
+                )
 
             if total_episodes > 0 and watched_episodes > total_episodes:
                 watched_episodes = total_episodes
 
-            print(f"📺 Shows: {total_tv_shows}")
+            logger.debug("TV shows: %s", total_tv_shows)
 
             return total_tv_shows, total_episodes, watched_episodes
             
         except Exception as e:
-            print(f"  ⚠️  Error fetching TV show statistics: {str(e)}")
+            logger.warning("Error fetching TV show statistics from %s: %s", self.base_url, e)
             return 0, 0, 0
     
     def get_music_statistics(self) -> tuple[int, int, int]:
@@ -307,7 +331,7 @@ class KodiLibraryProbe:
             Tuple of (total_artists, total_albums, total_songs)
         """
         try:
-            print("🎵  Fetching music statistics...")
+            logger.debug("Fetching music statistics from %s", self.base_url)
             
             # Get artists
             artists_result = self._make_request("AudioLibrary.GetArtists", {
@@ -330,7 +354,7 @@ class KodiLibraryProbe:
             return total_artists, total_albums, total_songs
             
         except Exception as e:
-            print(f"  ⚠️  Error fetching music statistics: {str(e)}")
+            logger.warning("Error fetching music statistics from %s: %s", self.base_url, e)
             return 0, 0, 0
     
     def get_recently_added_content(self, limit: int = None) -> RecentlyAdded:
@@ -350,7 +374,7 @@ class KodiLibraryProbe:
         recently_added = RecentlyAdded()
         
         try:
-            print("🆕  Fetching recently added content...")
+            logger.debug("Fetching recently added content from %s (limit=%s)", self.base_url, limit)
             
             # Get recently added episodes
             episodes_result = self._make_request("VideoLibrary.GetRecentlyAddedEpisodes", {
@@ -376,9 +400,9 @@ class KodiLibraryProbe:
             return recently_added
             
         except Exception as e:
-            print(f"  ⚠️  Error fetching recently added content: {str(e)}")
+            logger.warning("Error fetching recently added content from %s: %s", self.base_url, e)
             return recently_added
-    
+
     def get_all_statistics(self) -> LibraryStats:
         """
         Get all library statistics
@@ -479,7 +503,7 @@ def format_recent_item(item, item_type, kodi_host=None, probe=None):
                 
                 # Check if we already have this image
                 if os.path.exists(local_path):
-                    print(f"✅ Using cached artwork: {safe_filename}")
+                    logger.debug("Using cached artwork: %s", safe_filename)
                     return f"/artwork/{safe_filename}"
                 
                 # Try to download the image using Kodi's Files.PrepareDownload
@@ -502,7 +526,7 @@ def format_recent_item(item, item_type, kodi_host=None, probe=None):
                     
                     for download_url in download_urls:
                         try:
-                            print(f"🔍 Trying to download from: {download_url[:80]}...")
+                            logger.debug("Trying artwork download from: %s", download_url[:80])
                             
                             # Add authentication to the download request
                             if auth:
@@ -516,44 +540,48 @@ def format_recent_item(item, item_type, kodi_host=None, probe=None):
                                     for chunk in response.iter_content(chunk_size=8192):
                                         f.write(chunk)
                                 
-                                print(f"✅ Downloaded artwork: {safe_filename}")
+                                logger.debug("Downloaded artwork: %s", safe_filename)
                                 return f"/artwork/{safe_filename}"
                             else:
-                                print(f"❌ Download failed with status: {response.status_code}")
+                                logger.debug(
+                                    "Artwork download failed with status %s from %s",
+                                    response.status_code,
+                                    download_url[:80],
+                                )
                                 
                         except Exception as e:
-                            print(f"❌ Download attempt failed: {str(e)[:50]}...")
+                            logger.debug("Artwork download attempt failed: %s", str(e)[:80])
                             continue
                     
-                    print(f"⚠️  All download attempts failed for: {art_path[:50]}...")
+                    logger.warning("All artwork download attempts failed for: %s", art_path[:80])
                     
                 else:
-                    print(f"⚠️  No download path in result: {result}")
+                    logger.debug("No PrepareDownload path in result for artwork")
                     
             except Exception as e:
-                print(f"⚠️  Failed to download artwork: {str(e)}")
+                logger.warning("Failed to download artwork: %s", e)
         
         return ''
     
     if item_type == 'movie':
         art_path = item.get('art', {}).get('poster', '') if item.get('art') else ''
         if art_path:
-            print(f"🎬 Movie '{item.get('title', 'Unknown')}' has artwork: {art_path[:50]}...")
+            logger.debug("Movie '%s' has artwork: %s", item.get('title', 'Unknown'), art_path[:50])
         return {
             'title': item.get('title', 'Unknown Movie'),
             'subtitle': str(item.get('year', '')) if item.get('year') else '',
-            'date': item.get('dateadded', '')[:10] if item.get('dateadded') else '',
+            'date': (item.get('dateadded') or item.get('lastplayed', ''))[:10],
             'image': get_image_url(art_path),
             'icon': '🎬'
         }
     elif item_type == 'episode':
         art_path = item.get('art', {}).get('thumb', '') if item.get('art') else ''
         if art_path:
-            print(f"📺 Episode '{item.get('title', 'Unknown')}' has artwork: {art_path[:50]}...")
+            logger.debug("Episode '%s' has artwork: %s", item.get('title', 'Unknown'), art_path[:50])
         return {
             'title': item.get('title', 'Unknown Episode'),
             'subtitle': f"{item.get('showtitle', 'Unknown Show')} S{str(item.get('season', 0)).zfill(2)}E{str(item.get('episode', 0)).zfill(2)}",
-            'date': item.get('dateadded', '')[:10] if item.get('dateadded') else '',
+            'date': (item.get('dateadded') or item.get('lastplayed', ''))[:10],
             'image': get_image_url(art_path),
             'icon': '📺'
         }
@@ -562,11 +590,11 @@ def format_recent_item(item, item_type, kodi_host=None, probe=None):
         artist_name = artists[0] if artists else 'Unknown Artist'
         art_path = item.get('art', {}).get('thumb', '') if item.get('art') else ''
         if art_path:
-            print(f"🎵 Album '{item.get('title', 'Unknown')}' has artwork: {art_path[:50]}...")
+            logger.debug("Album '%s' has artwork: %s", item.get('title', 'Unknown'), art_path[:50])
         return {
             'title': item.get('title', 'Unknown Album'),
             'subtitle': artist_name,
-            'date': item.get('dateadded', '')[:10] if item.get('dateadded') else '',
+            'date': (item.get('dateadded') or item.get('lastplayed', ''))[:10],
             'image': get_image_url(art_path),
             'icon': '🎵'
         }

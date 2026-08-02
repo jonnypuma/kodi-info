@@ -21,6 +21,102 @@
 }
 
 body {
+  background: #0e1116 url("/background.jpg") center / cover fixed no-repeat;
+}
+
+.login-panel, .overview-panel {
+  min-height: 100vh;
+  align-items: center;
+  justify-content: center;
+}
+
+.login-card, .server-overview-card {
+  width: min(520px, 92vw);
+  padding: 2.5rem;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: var(--glass);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .38);
+}
+
+.login-card .logo {
+  width: 72px;
+  display: block;
+  margin: 0 auto 1rem;
+}
+
+.server-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1rem;
+  margin-top: 2rem;
+}
+
+.server-overview-card {
+  width: auto;
+  padding: 1.25rem;
+}
+
+.server-overview-card .server-state {
+  color: var(--muted);
+  margin: .5rem 0 1rem;
+}
+
+.server-overview-card.online .server-state { color: var(--ok); }
+.server-overview-card.offline .server-state { color: var(--err); }
+
+.custom-server-panel {
+  margin: 2rem auto 0;
+  width: min(760px, 100%);
+  padding: 1.5rem;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: rgba(0, 0, 0, .28);
+}
+
+.custom-server-panel .server-form {
+  width: 100%;
+}
+
+.server-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+  margin-top: 1rem;
+}
+
+.server-actions .btn {
+  flex: 1 1 125px;
+  min-width: 115px;
+}
+
+.server-operation-status {
+  min-height: 1.25rem;
+  margin-top: .75rem;
+  color: var(--muted);
+  font-size: .85rem;
+}
+
+.operation-status {
+  margin: 1rem 0;
+  padding: .8rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--muted);
+}
+
+.operation-history {
+  margin: 1rem 0;
+  color: var(--muted);
+}
+
+.history-row {
+  padding: .45rem 0;
+  border-bottom: 1px solid var(--line);
+  font-size: .85rem;
+}
+
+body {
   margin: 0;
   min-height: 100vh;
   font-family: "DM Sans", system-ui, sans-serif;
@@ -40,20 +136,12 @@ body {
   padding: 24px;
 }
 
-.picker-panel { background: rgba(12, 14, 18, 0.88); }
-
 .server-form {
   width: min(440px, 100%);
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid var(--line);
   border-radius: 16px;
   padding: 20px;
-}
-
-.picker-title {
-  text-align: center;
-  margin-bottom: 10px;
-  font-weight: 600;
 }
 
 .server-form label {

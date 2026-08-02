@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY kodi_info.py kodi_client.py connection_tokens.py library_actions.py webapp.py ./
+COPY kodi_info.py kodi_client.py connection_tokens.py library_actions.py operation_store.py webapp.py ./
 COPY templates ./templates
 COPY static ./static
 COPY favicon.ico background.jpg kodi.png movies.png tv.png music.png new.png refresh.png ./

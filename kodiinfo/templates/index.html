@@ -9,37 +9,60 @@
 </head>
 <body>
   <div id="app">
-    <!-- Server picker -->
-    <section id="view-picker" class="panel picker-panel">
-      <div class="server-form">
-        <div class="picker-title">Choose Kodi JSON-RPC endpoint</div>
-        <label for="preset-select">Saved servers (from compose / env)</label>
-        <select id="preset-select" aria-label="Preset Kodi server"></select>
-        <p class="muted" id="preset-empty-hint" hidden>No preset servers in environment. Use custom host and port below.</p>
-        <label for="custom-host">Custom host or IP</label>
-        <div class="custom-host-wrap">
-          <input id="custom-host" type="text" placeholder="e.g. 192.168.1.50" autocomplete="off" aria-controls="custom-recent-dropdown">
-          <div id="custom-recent-dropdown" class="recent-dropdown" hidden role="listbox" aria-label="Recently used custom servers"></div>
-        </div>
-        <div class="row2">
-          <div>
-            <label for="custom-port">Port</label>
-            <input id="custom-port" type="number" min="1" max="65535" value="8080">
+    <section id="view-login" class="panel login-panel" hidden>
+      <div class="login-card">
+        <img src="/kodi.png" alt="Kodi Logo" class="logo">
+        <h1>Welcome back</h1>
+        <p class="muted">Sign in to manage your Kodi libraries.</p>
+        <form id="login-form">
+          <label for="login-user">Username</label>
+          <input id="login-user" type="text" autocomplete="username" required>
+          <label for="login-pass">Password</label>
+          <input id="login-pass" type="password" autocomplete="current-password" required>
+          <p id="login-error" class="load-error-message" hidden></p>
+          <button type="submit" class="btn btn-primary">Sign in</button>
+        </form>
+      </div>
+    </section>
+    <section id="view-overview" class="panel overview-panel" hidden>
+      <div class="container">
+        <header class="header">
+          <img src="/kodi.png" alt="Kodi Logo" class="logo">
+          <h1> Kodi Servers</h1>
+          <p class="muted">Choose a server to open its library dashboard.</p>
+          <button id="logout-btn" class="btn" type="button" hidden>Sign out</button>
+        </header>
+        <div id="server-overview-grid" class="server-overview-grid"></div>
+        <div class="custom-server-panel">
+          <h2>Custom server</h2>
+          <p class="muted">Connect to a Kodi endpoint that is not configured in Docker Compose.</p>
+          <div class="server-form">
+            <label for="custom-host">Host or IP</label>
+            <div class="custom-host-wrap">
+              <input id="custom-host" type="text" placeholder="e.g. 192.168.1.50" autocomplete="off" aria-controls="custom-recent-dropdown">
+              <div id="custom-recent-dropdown" class="recent-dropdown" hidden role="listbox" aria-label="Recently used custom servers"></div>
+            </div>
+            <div class="row2">
+              <div>
+                <label for="custom-port">Port</label>
+                <input id="custom-port" type="number" min="1" max="65535" value="8080">
+              </div>
+              <div>
+                <label for="custom-scheme">Scheme</label>
+                <select id="custom-scheme">
+                  <option value="http" selected>http</option>
+                  <option value="https">https</option>
+                </select>
+              </div>
+            </div>
+            <label for="custom-user">Username (optional)</label>
+            <input id="custom-user" type="text" autocomplete="username">
+            <label for="custom-pass">Password (optional)</label>
+            <input id="custom-pass" type="password" autocomplete="current-password">
+            <div class="form-actions">
+              <button type="button" class="btn btn-primary" id="load-btn">Load custom library</button>
+            </div>
           </div>
-          <div>
-            <label for="custom-scheme">Scheme</label>
-            <select id="custom-scheme">
-              <option value="http" selected>http</option>
-              <option value="https">https</option>
-            </select>
-          </div>
-        </div>
-        <label for="custom-user">Username (optional)</label>
-        <input id="custom-user" type="text" autocomplete="username">
-        <label for="custom-pass">Password (optional)</label>
-        <input id="custom-pass" type="password" autocomplete="current-password">
-        <div class="form-actions">
-          <button type="button" class="btn btn-primary" id="load-btn">Load library</button>
         </div>
       </div>
     </section>
@@ -53,7 +76,7 @@
       <div id="loading-text" class="loading-text">Loading 0%</div>
       <div id="load-error-panel" class="load-error-panel" hidden>
         <p id="load-error-message" class="load-error-message"></p>
-        <button type="button" class="btn btn-primary" id="load-error-home-btn">Choose server again</button>
+        <button type="button" class="btn btn-primary" id="load-error-home-btn">Return to server overview</button>
       </div>
     </section>
 
@@ -80,6 +103,11 @@
           <div id="library-action-status-body" class="action-status-body"></div>
           <button type="button" id="library-action-status-close" class="action-status-close" aria-label="Dismiss">&times;</button>
         </div>
+        <div id="operation-status" class="operation-status" hidden></div>
+        <details id="operation-history" class="operation-history" hidden>
+          <summary>Recent library operations</summary>
+          <div id="operation-history-list"></div>
+        </details>
 
         <div class="stats">
           <div class="stat-column">

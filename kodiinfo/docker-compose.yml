@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  kodi-info:
+    build: ./kodiinfo
+    container_name: kodi-info
+    image: kodi-info
+    restart: unless-stopped
+    ports:
+      - "5005:5005"
+    environment:
+      # Each non-empty KODI_HOST then KODI_HOST_1…10 = one dropdown row (no merging).
+      - KODI_HOST=${KODI_HOST:-}
+      - KODI_USERNAME=${KODI_USERNAME:-}
+      - KODI_PASSWORD=${KODI_PASSWORD:-}
+      - KODI_LABEL=${KODI_LABEL:-}
+      - KODI_HOST_1=${KODI_HOST_1:-}
+      - KODI_USERNAME_1=${KODI_USERNAME_1:-}
+      - KODI_PASSWORD_1=${KODI_PASSWORD_1:-}
+      - KODI_LABEL_1=${KODI_LABEL_1:-}
+      - KODI_HOST_2=${KODI_HOST_2:-}
+      - KODI_USERNAME_2=${KODI_USERNAME_2:-}
+      - KODI_PASSWORD_2=${KODI_PASSWORD_2:-}
+      - KODI_LABEL_2=${KODI_LABEL_2:-}
+      - KODI_HOST_3=${KODI_HOST_3:-}
+      - KODI_USERNAME_3=${KODI_USERNAME_3:-}
+      - KODI_PASSWORD_3=${KODI_PASSWORD_3:-}
+      - KODI_LABEL_3=${KODI_LABEL_3:-}
+      # Same pattern for slots 4–10: KODI_HOST_4 … KODI_LABEL_4, etc.
+      #
+      # REQUIRED in production: stable secret so sessions survive restarts.
+      # Generate once: python -c "import secrets; print(secrets.token_hex(32))"
+      # If unset, the app uses a random key per process (fine for testing only).
+      - WEB_SECRET_KEY=${WEB_SECRET_KEY:-}
+      # Default recently-added count (UI dropdown can still pick 5/10/20/50)
+      - RECENT_LIMIT=${RECENT_LIMIT:-10}
+      # Optional web login in the format username:password. Empty disables login.
+      - BASIC_AUTH=${BASIC_AUTH:-}
+      # INFO, DEBUG, or TRACE (default INFO)
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - WEB_PORT=5005
+    env_file:
+      - ./.env
+    volumes:
+      - ./output:/app/output
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

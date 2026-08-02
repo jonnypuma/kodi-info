@@ -7,10 +7,13 @@ Uses file-based storage with thread-safe access.
 """
 
 import json
+import logging
 import os
 import threading
 from datetime import datetime
 from typing import Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class LibraryActionStore:
@@ -44,7 +47,7 @@ class LibraryActionStore:
             with open(self._file_path, 'w') as f:
                 json.dump(data, f, indent=2)
         except IOError as e:
-            print(f"⚠️  Failed to save library actions: {e}")
+            logger.warning("Failed to save library actions: %s", e)
     
     def record_action(self, host: str, action: str):
         """

@@ -23,6 +23,7 @@ from kodi_client import (
     resolve_start_load_connection,
 )
 import library_actions
+from operation_store import OperationStore
 
 
 class TestUrlParse(unittest.TestCase):
@@ -150,6 +151,35 @@ class TestLibraryActions(unittest.TestCase):
             self.assertIsNotNone(a["last_video_scan"])
             self.assertIsNotNone(a["last_video_clean"])
             self.assertIsNone(a["last_audio_scan"])
+
+
+class TestOperationStore(unittest.TestCase):
+    def test_state_and_history_persist(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "operations.json")
+            store = OperationStore(path=path)
+            job = store.start("http://kodi:8080", {"label": "Kodi"}, "VideoLibrary.Scan")
+            store.update("http://kodi:8080", job["job_id"], state="accepted", message="accepted")
+            reopened = OperationStore(path=path)
+            current = reopened.get_current("http://kodi:8080")
+            self.assertEqual(current["state"], "accepted")
+            self.assertEqual(reopened.get_history("http://kodi:8080")[0]["job_id"], job["job_id"])
+
+
+class TestWebAuth(unittest.TestCase):
+    def test_optional_basic_auth(self):
+        from webapp import create_app
+
+        with mock.patch.dict(
+            os.environ,
+            {"BASIC_AUTH": "admin:secret", "WEB_SECRET_KEY": "test-secret"},
+            clear=False,
+        ):
+            app = create_app()
+            client = app.test_client()
+            self.assertEqual(client.get("/api/config").status_code, 401)
+            self.assertEqual(client.post("/api/login", json={"username": "admin", "password": "secret"}).status_code, 200)
+            self.assertEqual(client.get("/api/config").status_code, 200)
 
 
 class TestRpcErrorFormat(unittest.TestCase):

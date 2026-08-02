@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import hmac
 import os
 import secrets
 import sys
@@ -13,12 +14,14 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 from flask import Flask, jsonify, request, send_file, send_from_directory, session
 
 import connection_tokens
 import library_actions
+import operation_store
 from kodi_client import (
     KodiLibraryProbe,
     LibraryStats,
@@ -34,6 +37,27 @@ from kodi_client import (
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
+APP_VERSION = "1.0.0"
+TRACE_LEVEL = 5
+logging.addLevelName(TRACE_LEVEL, "TRACE")
+
+
+def _configure_logging() -> None:
+    level_name = (os.getenv("LOG_LEVEL") or "INFO").strip().upper()
+    level = TRACE_LEVEL if level_name == "TRACE" else getattr(logging, level_name, logging.INFO)
+    root = logging.getLogger()
+    if not root.handlers:
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+            stream=sys.stderr,
+        )
+    root.setLevel(level)
+    logging.getLogger("werkzeug").setLevel(logging.WARNING if level <= logging.INFO else level)
+
+
+_configure_logging()
 
 
 def _format_kodi_rpc_error(rpc_err: Any) -> str:
@@ -63,19 +87,63 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
             "Sessions/tokens will not survive container restarts. Set WEB_SECRET_KEY in .env."
         )
     app.secret_key = secret
+    basic_auth = (os.getenv("BASIC_AUTH") or "").strip()
+    auth_user, auth_password = basic_auth.split(":", 1) if ":" in basic_auth else ("", "")
+    auth_enabled = bool(auth_user and auth_password)
+    if basic_auth and not auth_enabled:
+        logger.warning("BASIC_AUTH is set but must use username:password; authentication disabled")
+    app.config["AUTH_ENABLED"] = auth_enabled
 
     load_jobs: Dict[str, Dict[str, Any]] = {}
     load_lock = threading.Lock()
     preset_servers = collect_preset_kodi_servers()
+    seen_hosts = set()
+    for preset in preset_servers:
+        host = str(preset.get("host") or "").strip()
+        parsed = urlparse(host if "://" in host else "http://" + host)
+        try:
+            port = parsed.port or 8080
+        except ValueError:
+            port = 0
+        canonical = (parsed.scheme.lower(), (parsed.hostname or "").lower(), port)
+        if not parsed.hostname:
+            logger.warning("Invalid Kodi preset endpoint: %s", host)
+        if canonical in seen_hosts:
+            logger.warning("Duplicate Kodi preset endpoint: %s", host)
+        seen_hosts.add(canonical)
 
-    if not logger.handlers:
-        _h = logging.StreamHandler(sys.stderr)
-        _h.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%Y-%m-%dT%H:%M:%S")
-        )
-        logger.addHandler(_h)
-        logger.setLevel(logging.INFO)
-        logger.propagate = False
+    _configure_logging()
+    logger.setLevel(logging.getLogger().level)
+
+    @app.before_request
+    def require_auth():
+        if not auth_enabled:
+            return None
+        allowed = {
+            "index",
+            "health",
+            "ready",
+            "auth_status",
+            "login",
+            "logout",
+            "static",
+            "favicon",
+            "kodi_png",
+            "movies_png",
+            "tv_png",
+            "music_png",
+            "new_png",
+            "refresh_png",
+            "background_jpg",
+            "artwork",
+        }
+        if request.endpoint in allowed or request.endpoint is None:
+            return None
+        if session.get("authenticated"):
+            return None
+        if request.path.startswith("/api/"):
+            return jsonify({"success": False, "message": "Authentication required"}), 401
+        return jsonify({"success": False, "message": "Authentication required"}), 401
 
     def _token_from_request() -> Optional[str]:
         data = request.get_json(silent=True) or {}
@@ -98,6 +166,38 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
         if not conn or not conn.get("host"):
             return None, "Connection token expired or invalid — choose a server again"
         return conn, None
+
+    def _server_log_label(conn: Optional[Dict[str, Any]]) -> str:
+        if not conn:
+            return "(unknown server)"
+        host = (conn.get("host") or "").strip() or "?"
+        label = (conn.get("label") or "").strip()
+        preset = conn.get("preset_id")
+        parts = []
+        if label:
+            parts.append(label)
+        parts.append(host)
+        if preset is not None and str(preset).strip() != "":
+            parts.append(f"preset={preset}")
+        return " · ".join(parts)
+
+    def _server_key(conn: Dict[str, Any]) -> str:
+        """Stable identity used for persisted per-server state."""
+        scheme = str(conn.get("scheme") or "").lower()
+        host = str(conn.get("host") or "").strip().lower()
+        if "://" in host:
+            scheme, host = host.split("://", 1)
+        port = conn.get("port")
+        if port:
+            return f"{scheme or 'http'}://{host}:{port}"
+        return f"{scheme or 'http'}://{host}"
+
+    def _server_target(conn: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "label": conn.get("label") or conn.get("host") or "",
+            "host": conn.get("host") or "",
+            "preset_id": conn.get("preset_id"),
+        }
 
     def _kodi_rpc_post(
         probe: KodiLibraryProbe,
@@ -132,32 +232,68 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
             return body, None
         return None, f"Unexpected response from Kodi: {body.get('result', body)}"
 
-    def _dispatch_library_command(method: str, max_wait_s: float) -> Tuple[bool, str]:
-        conn, err = _conn_from_token()
-        if not conn:
-            return False, err or "No connection"
+    def _run_library_job(
+        job: Dict[str, Any],
+        conn: Dict[str, Any],
+        method: str,
+        action_key: str,
+        max_wait_s: float,
+    ) -> None:
+        server_key = job["server_key"]
+        job_id = job["job_id"]
+        target = _server_log_label(conn)
         probe = KodiLibraryProbe(
             conn["host"], None, conn.get("username") or "", conn.get("password") or ""
         )
-        state: Dict[str, Any] = {"err": None, "finished": False}
-
-        def worker() -> None:
-            _, e = _kodi_rpc_post(probe, method, read_timeout=None)
-            state["err"] = e
-            state["finished"] = True
-
-        threading.Thread(target=worker, daemon=True).start()
-        deadline = time.time() + max_wait_s
-        while not state["finished"] and time.time() < deadline:
-            time.sleep(0.05)
-        if state["finished"]:
-            if state["err"]:
-                return False, state["err"]
-            return True, ""
-        return False, (
-            f"Kodi did not return a response within {int(max_wait_s)} seconds. "
-            "The library may be busy — check Kodi logs and try again."
+        operation_store.update(server_key, job_id, state="running", message="Contacting Kodi")
+        response, err = _kodi_rpc_post(probe, method, read_timeout=max_wait_s)
+        if err:
+            logger.warning("Library action failed: %s → %s — %s", method, target, err)
+            operation_store.update(
+                server_key,
+                job_id,
+                state="timed_out" if err == "timeout" else "failed",
+                message=err,
+            )
+            return
+        operation_store.update(
+            server_key,
+            job_id,
+            state="accepted",
+            message="Kodi accepted the request; completion is not confirmed by HTTP RPC",
         )
+        logger.info("Library action accepted: %s → %s", method, target)
+        # Kodi's HTTP JSON-RPC has no portable completion query. Keep the
+        # operation visible as accepted rather than falsely claiming completion.
+        try:
+            library_actions.record_action(conn["host"], action_key)
+        except Exception:
+            logger.exception("Could not persist library action (job=%s)", job_id[:8])
+
+    def _dispatch_library_command(
+        method: str, action_key: str, max_wait_s: float
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        conn, err = _conn_from_token()
+        if not conn:
+            logger.warning("Library action %s refused — no connection: %s", method, err)
+            return None, err or "No connection"
+        target = _server_log_label(conn)
+        logger.info("Library action requested: %s → %s", method, target)
+        server_key = _server_key(conn)
+        job = operation_store.start(server_key, _server_target(conn), method)
+        job["server_key"] = server_key
+        logger.info(
+            "Library action queued: %s → %s (job=%s)",
+            method,
+            target,
+            job["job_id"][:8],
+        )
+        threading.Thread(
+            target=_run_library_job,
+            args=(job, dict(conn), method, action_key, max_wait_s),
+            daemon=True,
+        ).start()
+        return job, None
 
     def update_job(job_id: str, progress: int, message: str = None, status: str = "running"):
         with load_lock:
@@ -171,18 +307,18 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
             job["updated_at"] = time.time()
 
     def run_load_job(job_id: str, conn: Dict[str, Any], recent_limit: int):
+        target = _server_log_label(conn)
+        started = time.time()
+        logger.info("Library load started: %s (job=%s recent=%s)", target, job_id[:8], recent_limit)
         try:
             update_job(job_id, 5, "Connecting")
             probe = KodiLibraryProbe(
                 conn["host"], None, conn.get("username") or "", conn.get("password") or ""
             )
             if not probe.connect():
-                update_job(
-                    job_id,
-                    100,
-                    probe.last_error or f"Unable to connect to Kodi at {conn.get('host', '')}",
-                    status="error",
-                )
+                msg = probe.last_error or f"Unable to connect to Kodi at {conn.get('host', '')}"
+                logger.warning("Library load connect failed: %s — %s", target, msg)
+                update_job(job_id, 100, msg, status="error")
                 return
 
             stats = LibraryStats()
@@ -299,12 +435,46 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
                         "default_recent_limit": recent_limit_from_env(),
                     }
             update_job(job_id, 100, "Done", status="done")
+            elapsed = time.time() - started
+            logger.info(
+                "Library load OK: %s in %.1fs (movies=%s shows=%s episodes=%s)",
+                target,
+                elapsed,
+                stats.total_movies,
+                stats.total_tv_shows,
+                stats.total_episodes,
+            )
         except Exception as e:
+            logger.exception("Library load failed: %s — %s", target, e)
             update_job(job_id, 100, f"Error: {str(e)}", status="error")
 
     @app.route("/")
     def index():
         return send_from_directory(app.template_folder, "index.html")
+
+    @app.route("/api/auth-status")
+    def auth_status():
+        return jsonify({"success": True, "enabled": auth_enabled, "authenticated": bool(session.get("authenticated"))})
+
+    @app.route("/api/login", methods=["POST"])
+    def login():
+        if not auth_enabled:
+            return jsonify({"success": True, "authenticated": True})
+        data = request.get_json(silent=True) or {}
+        user = str(data.get("username") or "")
+        password = str(data.get("password") or "")
+        valid = hmac.compare_digest(user, auth_user) and hmac.compare_digest(password, auth_password)
+        if not valid:
+            logger.warning("Web login failed for username %r", user[:64])
+            return jsonify({"success": False, "message": "Invalid username or password"}), 401
+        session["authenticated"] = True
+        session.permanent = True
+        return jsonify({"success": True, "authenticated": True})
+
+    @app.route("/api/logout", methods=["POST"])
+    def logout():
+        session.clear()
+        return jsonify({"success": True})
 
     @app.route("/api/config")
     def api_config():
@@ -313,6 +483,7 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
         ]
         return jsonify(
             {
+                "version": APP_VERSION,
                 "presets": presets,
                 "default_recent_limit": recent_limit_from_env(),
                 "recent_limit_options": [5, 10, 20, 50],
@@ -323,6 +494,35 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
     def api_servers():
         payload = [{"id": p["id"], "label": p["label"], "host": p["host"]} for p in preset_servers]
         return jsonify({"servers": payload})
+
+    @app.route("/api/server-overview")
+    def server_overview():
+        result = []
+        for preset in preset_servers:
+            conn = {
+                "host": preset["host"],
+                "username": preset.get("username") or "",
+                "password": preset.get("password") or "",
+                "label": preset.get("label") or preset["host"],
+                "preset_id": preset.get("id"),
+            }
+            probe = KodiLibraryProbe(conn["host"], None, conn["username"], conn["password"])
+            ok, detail = probe.ping()
+            key = _server_key(conn)
+            result.append(
+                {
+                    "id": preset.get("id"),
+                    "label": conn["label"],
+                    "host": conn["host"],
+                    "reachable": bool(ok),
+                    "detail": detail,
+                    "kodi_version": probe.kodi_version or None,
+                    "actions": library_actions.get_actions(conn["host"]),
+                    "current_operation": operation_store.get_current(key),
+                    "history": operation_store.get_history(key, 5),
+                }
+            )
+        return jsonify({"success": True, "servers": result})
 
     @app.route("/api/ensure-connection", methods=["POST"])
     def api_ensure_connection():
@@ -339,6 +539,7 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
                 session["connection_token"] = tok
                 session.permanent = True
                 session.modified = True
+                logger.info("Ensure-connection reused token → %s", _server_log_label(conn))
                 return jsonify(
                     {
                         "success": True,
@@ -350,6 +551,7 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
 
         conn, err = resolve_start_load_connection(data, preset_servers)
         if err or not conn:
+            logger.warning("Ensure-connection resolve failed: %s", err or "Unable to resolve Kodi connection")
             return jsonify({"success": False, "message": err or "Unable to resolve Kodi connection"}), 400
 
         token = connection_tokens.issue_token(dict(conn))
@@ -361,6 +563,7 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
         }
         session.permanent = True
         session.modified = True
+        logger.info("Ensure-connection issued token → %s", _server_log_label(conn))
         return jsonify(
             {
                 "success": True,
@@ -379,6 +582,7 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
         if tok and not data.get("custom") and not data.get("preset") and not data.get("server_id"):
             conn = connection_tokens.get_connection(tok)
             if not conn:
+                logger.warning("Start-load refused — connection token expired or invalid")
                 return jsonify(
                     {"success": False, "message": "Connection token expired — choose a server again"}
                 ), 400
@@ -404,6 +608,7 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
 
         conn, err = resolve_start_load_connection(data, preset_servers)
         if err or not conn:
+            logger.warning("Start-load resolve failed: %s", err or "Unable to resolve Kodi connection")
             return jsonify({"success": False, "message": err or "Unable to resolve Kodi connection"}), 400
 
         token = connection_tokens.issue_token(dict(conn))
@@ -443,6 +648,7 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
             # reuse POST body path via temporary request — just call resolve
             conn, err = resolve_start_load_connection(data, preset_servers)
             if err or not conn:
+                logger.warning("Start-load (compat GET) resolve failed: %s", err)
                 return jsonify({"success": False, "message": err}), 400
             token = connection_tokens.issue_token(dict(conn))
             job_id = uuid.uuid4().hex
@@ -521,17 +727,45 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
         return jsonify({"success": True, "actions": library_actions.get_actions(conn["host"])})
 
     def _library_action_route(method: str, action_key: str, ok_message: str, max_wait: float):
-        ok, err = _dispatch_library_command(method, max_wait_s=max_wait)
-        if ok:
-            conn, _ = _conn_from_token()
-            if conn and conn.get("host"):
-                try:
-                    library_actions.record_action(conn["host"], action_key)
-                except Exception:
-                    logger.exception("Failed to record library action")
-            actions = library_actions.get_actions(conn["host"]) if conn else {}
-            return jsonify({"success": True, "message": ok_message, "library_actions": actions})
-        return jsonify({"success": False, "message": err})
+        job, err = _dispatch_library_command(method, action_key, max_wait_s=max_wait)
+        if not job:
+            return jsonify({"success": False, "message": err})
+        return jsonify(
+            {
+                "success": True,
+                "message": "Library operation started",
+                "job": job,
+                "operation": method,
+            }
+        ), 202
+
+    @app.route("/api/library-operation/<job_id>")
+    def library_operation(job_id):
+        conn, err = _conn_from_token()
+        if not conn:
+            return jsonify({"success": False, "message": err}), 400
+        key = _server_key(conn)
+        current = operation_store.get_current(key)
+        history = operation_store.get_history(key)
+        job = next((item for item in history if item.get("job_id") == job_id), None)
+        if not job and current and current.get("job_id") == job_id:
+            job = current
+        if not job:
+            return jsonify({"success": False, "message": "Operation not found"}), 404
+        return jsonify({"success": True, "job": job, "history": history})
+
+    @app.route("/api/library-operation-history")
+    def library_operation_history():
+        conn, err = _conn_from_token()
+        if not conn:
+            return jsonify({"success": False, "message": err}), 400
+        return jsonify(
+            {
+                "success": True,
+                "current": operation_store.get_current(_server_key(conn)),
+                "history": operation_store.get_history(_server_key(conn)),
+            }
+        )
 
     @app.route("/api/update-video-library", methods=["POST"])
     @app.route("/update-video-library", methods=["POST"])
@@ -679,12 +913,24 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
             "<body>Redirecting…</body></html>"
         )
 
+    if preset_servers:
+        logger.info(
+            "Preset Kodi servers (%s): %s",
+            len(preset_servers),
+            "; ".join(f"{p.get('label') or p.get('host')} [{p.get('host')}]" for p in preset_servers),
+        )
+    else:
+        logger.info("No preset Kodi servers configured (custom host entry only)")
     logger.info("Web app ready on port %s (container host hint: %s)", web_port, container_host)
     return app
 
 
 def create_web_server(web_port: int = 5005, container_host: str = "localhost"):
     app = create_app(web_port=web_port, container_host=container_host)
-    print(f"🌐 Starting web server on port {web_port}")
-    print(f"📊 Access statistics at: http://localhost:{web_port} or http://{container_host}:{web_port}")
-    app.run(host="0.0.0.0", port=web_port, debug=False)
+    logger.info("Starting web server on port %s (http://%s:%s)", web_port, container_host, web_port)
+    try:
+        from waitress import serve
+        serve(app, host="0.0.0.0", port=web_port, threads=8)
+    except ImportError:
+        logger.warning("Waitress unavailable; falling back to Flask development server")
+        app.run(host="0.0.0.0", port=web_port, debug=False)

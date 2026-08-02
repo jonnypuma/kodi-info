@@ -16,15 +16,20 @@
   let statusTimer = null;
   let currentToken = null;
   let currentCacheKey = null;
+  let lastLoadBody = null;
+  let actionsReady = false;
   let loadFinished = false;
   let loadInProgress = false;
   let activeJobId = null;
+  let operationTimer = null;
+  let operationReloaded = {};
 
   const $ = (id) => document.getElementById(id);
 
   function showView(name) {
     const views = {
-      picker: $("view-picker"),
+      login: $("view-login"),
+      overview: $("view-overview"),
       loading: $("view-loading"),
       dashboard: $("view-dashboard"),
     };
@@ -260,8 +265,29 @@
     bindZoom();
   }
 
+  function setLibraryActionsEnabled(enabled) {
+    actionsReady = !!enabled;
+    ["update-video-btn", "update-audio-btn", "clean-video-btn", "clean-music-btn", "refresh-btn"].forEach((id) => {
+      const el = $(id);
+      if (!el) return;
+      if (id === "refresh-btn") {
+        el.style.opacity = enabled ? "" : "0.45";
+        el.style.pointerEvents = enabled ? "" : "none";
+        return;
+      }
+      el.disabled = !enabled;
+    });
+  }
+
+  function activeServerLabel() {
+    const el = $("kodi-display");
+    const t = el ? String(el.textContent || "") : "";
+    return t.replace(/^Connected to:\s*/i, "").trim() || "current server";
+  }
+
   function renderDashboard(data, opts) {
     opts = opts || {};
+    clearStatus();
     loadInProgress = false;
     const loadBtn = $("load-btn");
     if (loadBtn) loadBtn.disabled = false;
@@ -297,6 +323,12 @@
     renderRecentList("recent-episodes", recent.episodes, "episode-thumb");
     renderRecentList("recent-albums", recent.albums, "album-cover");
     showView("dashboard");
+    if (opts.actionsReady === false) {
+      setLibraryActionsEnabled(false);
+    } else {
+      setLibraryActionsEnabled(true);
+      startOperationPolling();
+    }
   }
 
   function bindZoom() {
@@ -353,6 +385,79 @@
     }
   }
 
+  function formatDuration(seconds) {
+    const total = Math.max(0, Math.floor(Number(seconds) || 0));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    return (h ? String(h).padStart(2, "0") + ":" : "") +
+      String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+  }
+
+  function renderOperation(job) {
+    const el = $("operation-status");
+    if (!el) return;
+    if (!job) {
+      el.hidden = true;
+      return;
+    }
+    const started = Date.parse(job.started_at || "") || Date.now();
+    const end = job.finished_at ? (Date.parse(job.finished_at) || Date.now()) : Date.now();
+    const elapsed = Math.max(0, Math.floor((end - started) / 1000));
+    const state = String(job.state || "requested").replace("_", " ");
+    el.hidden = false;
+    el.textContent = job.operation + " · " + state + " · " + formatDuration(elapsed) +
+      (job.message ? " — " + job.message : "");
+  }
+
+  function renderOperationHistory(history) {
+    const details = $("operation-history");
+    const list = $("operation-history-list");
+    if (!details || !list) return;
+    const items = Array.isArray(history) ? history : [];
+    details.hidden = items.length === 0;
+    list.textContent = "";
+    items.slice(0, 10).forEach((job) => {
+      const row = document.createElement("div");
+      row.className = "history-row";
+      row.textContent = job.operation + " · " + job.state + " · " +
+        formatActionTime(job.started_at) + " · " + formatDuration(job.elapsed_seconds);
+      list.appendChild(row);
+    });
+  }
+
+  function stopOperationPolling() {
+    if (operationTimer) {
+      clearInterval(operationTimer);
+      operationTimer = null;
+    }
+  }
+
+  async function refreshOperationState() {
+    if (!actionsReady) return;
+    try {
+      const res = await fetch("/api/library-operation-history", { credentials: "same-origin" });
+      if (!res.ok) return;
+      const data = await res.json();
+      const job = data.current;
+      renderOperation(job);
+      renderOperationHistory(data.history);
+      if (!job) return;
+      if (job.state === "accepted" && !operationReloaded[job.job_id]) {
+        operationReloaded[job.job_id] = true;
+        // HTTP JSON-RPC confirms acceptance, not scanner completion. Reload
+        // shortly so newly indexed items appear without claiming completion.
+        setTimeout(() => refreshDashboard(), 1500);
+      }
+    } catch (e) {}
+  }
+
+  function startOperationPolling() {
+    stopOperationPolling();
+    refreshOperationState();
+    operationTimer = setInterval(refreshOperationState, POLL_MS);
+  }
+
   async function pollJob(jobId) {
     stopPolling();
     activeJobId = jobId;
@@ -384,7 +489,7 @@
               if (currentCacheKey) rememberTokenForKey(currentCacheKey, body.data.connection_token);
             }
             loadInProgress = false;
-            renderDashboard(body.data, { cacheKey: currentCacheKey, fromCache: false });
+            renderDashboard(body.data, { cacheKey: currentCacheKey, fromCache: false, actionsReady: true });
             if (currentCacheKey) {
               cacheSet(currentCacheKey, body.data).catch(() => {});
             }
@@ -412,12 +517,12 @@
 
   async function ensureConnection(body, cacheKey) {
     const payload = Object.assign({}, body || {});
-    const mapped = tokenForKey(cacheKey) || getToken();
-    if (mapped && !payload.connection_token && !payload.custom && !payload.preset) {
+    // Only reuse a token bound to THIS cache key — never the previous server's token.
+    const mapped = tokenForKey(cacheKey);
+    if (mapped) {
       payload.connection_token = mapped;
-    } else if (mapped && !payload.password) {
-      // Prefer remembered token when reopening a custom server without retyping password
-      payload.connection_token = mapped;
+    } else {
+      delete payload.connection_token;
     }
     try {
       const res = await fetch("/api/ensure-connection", {
@@ -434,7 +539,7 @@
         setToken(data.connection_token);
         if (cacheKey) rememberTokenForKey(cacheKey, data.connection_token);
       }
-      return { ok: true, token: data.connection_token };
+      return { ok: true, token: data.connection_token, host: data.host || "" };
     } catch (e) {
       return { ok: false, message: (e && e.message) || String(e) };
     }
@@ -444,29 +549,34 @@
     opts = opts || {};
     const forceRefresh = !!opts.forceRefresh;
     if (loadInProgress) return;
+    clearStatus();
+    lastLoadBody = body ? Object.assign({}, body) : null;
     const cacheKey = makeCacheKey(body);
     if (cacheKey) currentCacheKey = cacheKey;
 
     if (!forceRefresh && cacheKey) {
       const entry = await cacheGet(cacheKey);
       if (cacheIsFresh(entry)) {
-        const mappedTok = tokenForKey(cacheKey);
-        if (mappedTok) setToken(mappedTok);
+        // Do not keep the previous server's token; wait until this server is ensured.
+        setToken(tokenForKey(cacheKey) || "");
+        setLibraryActionsEnabled(false);
         renderDashboard(entry.data, {
           cacheKey,
           fromCache: true,
           cachedAt: entry.cachedAt,
+          actionsReady: false,
         });
-        // Refresh opaque token in background so Scan/Clean/Refresh still work
-        ensureConnection(body, cacheKey).then((r) => {
-          if (!r.ok) {
-            showStatus(
-              "err",
-              "Cached library shown",
-              "Could not refresh connection for actions: " + (r.message || "unknown error")
-            );
-          }
-        });
+        const ensured = await ensureConnection(body, cacheKey);
+        if (ensured.ok) {
+          setLibraryActionsEnabled(true);
+        } else {
+          setLibraryActionsEnabled(false);
+          showStatus(
+            "err",
+            "Cached library shown — actions disabled",
+            "Could not bind connection for this server: " + (ensured.message || "unknown error")
+          );
+        }
         return;
       }
     }
@@ -476,6 +586,7 @@
     }
 
     loadInProgress = true;
+    setLibraryActionsEnabled(false);
     resetLoadError();
     loadFinished = false;
     stopPolling();
@@ -512,22 +623,17 @@
     }
   }
 
-  function buildPickerPayload() {
-    const sel = $("preset-select");
-    const val = sel ? sel.value : "custom";
+  function buildCustomServerPayload() {
     const recentLimit = Number(($("recent-limit-select") && $("recent-limit-select").value) || config.default_recent_limit || 10);
-    if (val === "custom") {
-      return {
-        custom: true,
-        host: ($("custom-host") && $("custom-host").value) || "",
-        port: ($("custom-port") && $("custom-port").value) || 8080,
-        scheme: ($("custom-scheme") && $("custom-scheme").value) || "http",
-        username: ($("custom-user") && $("custom-user").value) || "",
-        password: ($("custom-pass") && $("custom-pass").value) || "",
-        recent_limit: recentLimit,
-      };
-    }
-    return { preset: val, recent_limit: recentLimit };
+    return {
+      custom: true,
+      host: ($("custom-host") && $("custom-host").value) || "",
+      port: ($("custom-port") && $("custom-port").value) || 8080,
+      scheme: ($("custom-scheme") && $("custom-scheme").value) || "http",
+      username: ($("custom-user") && $("custom-user").value) || "",
+      password: ($("custom-pass") && $("custom-pass").value) || "",
+      recent_limit: recentLimit,
+    };
   }
 
   function recentCustomLoad() {
@@ -583,39 +689,9 @@
         $("custom-user").value = e.u || "";
         $("custom-pass").value = "";
         box.hidden = true;
-        const sel = $("preset-select");
-        if (sel) sel.value = "custom";
       });
       box.appendChild(btn);
     });
-  }
-
-  function populatePresets() {
-    const sel = $("preset-select");
-    const emptyHint = $("preset-empty-hint");
-    const presets = config.presets || [];
-    sel.innerHTML = "";
-    if (!presets.length) {
-      emptyHint.hidden = false;
-      const opt = document.createElement("option");
-      opt.value = "custom";
-      opt.textContent = "Custom (manual host / port)";
-      sel.appendChild(opt);
-      sel.value = "custom";
-      return;
-    }
-    emptyHint.hidden = true;
-    presets.forEach((p) => {
-      const opt = document.createElement("option");
-      opt.value = String(p.id);
-      opt.textContent = (p.label || ("Server " + p.id)) + (p.host ? " — " + p.host : "");
-      sel.appendChild(opt);
-    });
-    const custom = document.createElement("option");
-    custom.value = "custom";
-    custom.textContent = "Custom (manual host / port)";
-    sel.appendChild(custom);
-    sel.value = String(presets[0].id);
   }
 
   function clearStatus() {
@@ -644,19 +720,33 @@
   }
 
   async function libraryAction(endpoint, label, button) {
+    if (!actionsReady) return;
     clearStatus();
     const original = button.textContent;
     button.disabled = true;
     button.textContent = "Working…";
     try {
+      // Always bind to the active dashboard's server before calling Kodi.
+      if (lastLoadBody) {
+        const ensured = await ensureConnection(lastLoadBody, currentCacheKey);
+        if (!ensured.ok) {
+          throw new Error(ensured.message || "Could not bind connection for this server");
+        }
+      }
+      let tok = (currentCacheKey && tokenForKey(currentCacheKey)) || getToken();
+      if (!tok) {
+        throw new Error("No connection for this server — choose it again from the list");
+      }
+      setToken(tok);
+
       const res = await fetch(endpoint, {
         method: "POST",
         credentials: "same-origin",
         headers: {
           "Content-Type": "application/json",
-          "X-Connection-Token": getToken(),
+          "X-Connection-Token": tok,
         },
-        body: JSON.stringify({ connection_token: getToken() }),
+        body: JSON.stringify({ connection_token: tok }),
       });
       const text = await res.text();
       let data = {};
@@ -664,30 +754,30 @@
       if (!res.ok || !data.success) {
         throw new Error((data && data.message) || ("HTTP " + res.status));
       }
-      button.textContent = "Sent!";
+      button.textContent = "Started";
       button.style.background = "#28a745";
-      showStatus("ok", label + " — Kodi OK", data.message || "");
-      if (data.library_actions) {
-        updateLibraryMeta(data.library_actions);
-        if (currentCacheKey) {
-          cacheGet(currentCacheKey).then((entry) => {
-            if (!entry || !entry.data) return;
-            entry.data.library_actions = data.library_actions;
-            cacheSet(currentCacheKey, entry.data).catch(() => {});
-          });
-        }
-      }
+      const server = activeServerLabel();
+      showStatus(
+        "ok",
+        label + " started (" + server + ")",
+        data.message || "Tracking operation status"
+      );
+      startOperationPolling();
       setTimeout(() => {
-        button.disabled = false;
+        button.disabled = !actionsReady;
         button.textContent = original;
         button.style.background = "";
       }, BTN_OK_MS);
     } catch (err) {
       button.textContent = "Failed — details below";
       button.style.background = "#dc3545";
-      showStatus("err", label + " failed", (err && err.message) || String(err));
+      showStatus(
+        "err",
+        label + " failed (" + activeServerLabel() + ")",
+        (err && err.message) || String(err)
+      );
       setTimeout(() => {
-        button.disabled = false;
+        button.disabled = !actionsReady;
         button.textContent = original;
         button.style.background = "";
       }, BTN_ERR_MS);
@@ -695,20 +785,24 @@
   }
 
   async function refreshDashboard() {
-    const tok = getToken();
-    if (!tok) {
-      showView("picker");
+    if (!actionsReady) return;
+    const tok = (currentCacheKey && tokenForKey(currentCacheKey)) || getToken();
+    if (!tok && !lastLoadBody) {
+      showOverview();
       return;
     }
     const recentLimit = Number(($("recent-limit-select") && $("recent-limit-select").value) || config.default_recent_limit || 10);
-    await startLoad(
-      { connection_token: tok, recent_limit: recentLimit },
-      { forceRefresh: true }
-    );
+    // Keep preset/custom identity so a later Scan still targets this server.
+    const body = lastLoadBody
+      ? Object.assign({}, lastLoadBody, { recent_limit: recentLimit })
+      : { connection_token: tok, recent_limit: recentLimit };
+    if (tok) body.connection_token = tok;
+    await startLoad(body, { forceRefresh: true });
   }
 
   async function changeRecentLimit() {
-    const tok = getToken();
+    if (!actionsReady) return;
+    const tok = (currentCacheKey && tokenForKey(currentCacheKey)) || getToken();
     if (!tok) return;
     const limit = Number($("recent-limit-select").value || 10);
     try {
@@ -740,20 +834,155 @@
     }
   }
 
+  const OVERVIEW_ACTIONS = [
+    ["/api/update-video-library", "Scan video", "update-video-btn"],
+    ["/api/update-audio-library", "Scan music", "update-audio-btn"],
+    ["/api/clean-video-library", "Clean video", "clean-video-btn"],
+    ["/api/clean-music-library", "Clean music", "clean-music-btn"],
+  ];
+
+  async function runOverviewAction(server, endpoint, label, card) {
+    const buttons = card.querySelectorAll("button");
+    buttons.forEach((button) => { button.disabled = true; });
+    const status = card.querySelector(".server-operation-status");
+    if (status) status.textContent = label + " starting…";
+    const body = { preset: String(server.id) };
+    const cacheKey = "preset:" + String(server.id);
+    try {
+      const ensured = await ensureConnection(body, cacheKey);
+      if (!ensured.ok) throw new Error(ensured.message || "Could not connect");
+      const token = ensured.token || tokenForKey(cacheKey) || getToken();
+      const res = await fetch(endpoint, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Connection-Token": token,
+        },
+        body: JSON.stringify({ connection_token: token }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) throw new Error(data.message || ("HTTP " + res.status));
+      if (status) status.textContent = label + " accepted · tracking duration";
+      setTimeout(() => showOverview(), 1500);
+    } catch (error) {
+      if (status) status.textContent = label + " failed: " + ((error && error.message) || error);
+      buttons.forEach((button) => { button.disabled = false; });
+    }
+  }
+
+  async function openOverviewServer(server, forceRefresh) {
+    const body = { preset: String(server.id), recent_limit: config.default_recent_limit || 10 };
+    await startLoad(body, { forceRefresh: !!forceRefresh });
+  }
+
+  async function showOverview() {
+    showView("overview");
+    const grid = $("server-overview-grid");
+    if (!grid) return;
+    grid.textContent = "Checking configured servers…";
+    try {
+      const res = await fetch("/api/server-overview", { credentials: "same-origin" });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.message || "Unable to load overview");
+      grid.textContent = "";
+      (data.servers || []).forEach((server) => {
+        const card = document.createElement("article");
+        card.className = "server-overview-card " + (server.reachable ? "online" : "offline");
+        const state = server.reachable ? "Online" : "Offline";
+        const current = server.current_operation;
+        card.innerHTML =
+          "<h2></h2><p class=\"muted\"></p><p class=\"server-state\">" + state +
+          (server.kodi_version ? " · " + server.kodi_version : "") + "</p>" +
+          (current ? "<p class=\"muted\">" + current.operation + " · " + current.state + "</p>" : "") +
+          "<div class=\"server-operation-status\"></div>" +
+          "<div class=\"server-actions\"></div>";
+        card.querySelector("h2").textContent = server.label || server.host;
+        card.querySelector("p.muted").textContent = server.host;
+        const actions = card.querySelector(".server-actions");
+        const open = document.createElement("button");
+        open.type = "button";
+        open.className = "btn btn-primary";
+        open.textContent = "Open dashboard";
+        open.addEventListener("click", () => openOverviewServer(server, false));
+        actions.appendChild(open);
+        OVERVIEW_ACTIONS.forEach(([endpoint, label]) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "btn";
+          button.textContent = label;
+          button.addEventListener("click", () => runOverviewAction(server, endpoint, label, card));
+          actions.appendChild(button);
+        });
+        const refresh = document.createElement("button");
+        refresh.type = "button";
+        refresh.className = "btn";
+        refresh.textContent = "Refresh";
+        refresh.addEventListener("click", () => openOverviewServer(server, true));
+        actions.appendChild(refresh);
+        grid.appendChild(card);
+      });
+    } catch (e) {
+      grid.textContent = (e && e.message) || "Unable to load server overview";
+    }
+  }
+
+  async function checkAuth() {
+    try {
+      const res = await fetch("/api/auth-status", { credentials: "same-origin" });
+      const data = await res.json();
+      if (data.enabled && !data.authenticated) {
+        showView("login");
+        return false;
+      }
+      const logout = $("logout-btn");
+      if (logout) logout.hidden = !data.enabled;
+      return true;
+    } catch (e) {
+      showView("login");
+      return false;
+    }
+  }
+
   async function init() {
+    const loginForm = $("login-form");
+    if (loginForm) {
+      loginForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const error = $("login-error");
+        const res = await fetch("/api/login", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: $("login-user").value,
+            password: $("login-pass").value,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.success) {
+          error.textContent = data.message || "Login failed";
+          error.hidden = false;
+          return;
+        }
+        error.hidden = true;
+        location.reload();
+      });
+    }
+    const authenticated = await checkAuth();
+    if (!authenticated) return;
     try {
       const res = await fetch("/api/config");
       config = await res.json();
     } catch (e) {
       config = { presets: [], default_recent_limit: 10, recent_limit_options: [5, 10, 20, 50] };
     }
-    populatePresets();
     const sel = $("recent-limit-select");
     if (sel && config.default_recent_limit) sel.value = String(config.default_recent_limit);
 
     $("load-btn").addEventListener("click", async () => {
       if (loadInProgress) return;
-      const body = buildPickerPayload();
+      const body = buildCustomServerPayload();
       recentCustomSave(body);
       try {
         await startLoad(body);
@@ -765,17 +994,20 @@
     $("load-error-home-btn").addEventListener("click", () => {
       resetLoadError();
       loadInProgress = false;
+      clearStatus();
       const loadBtn = $("load-btn");
       if (loadBtn) loadBtn.disabled = false;
-      showView("picker");
+      showOverview();
     });
     $("switch-server-link").addEventListener("click", (e) => {
       e.preventDefault();
       loadInProgress = false;
       stopPolling();
+      clearStatus();
+      setLibraryActionsEnabled(false);
       const loadBtn = $("load-btn");
       if (loadBtn) loadBtn.disabled = false;
-      showView("picker");
+      showOverview();
     });
     $("refresh-btn").addEventListener("click", () => refreshDashboard());
     $("update-video-btn").addEventListener("click", () =>
@@ -792,6 +1024,11 @@
     );
     $("library-action-status-close").addEventListener("click", clearStatus);
     $("recent-limit-select").addEventListener("change", changeRecentLimit);
+    $("logout-btn").addEventListener("click", async () => {
+      await fetch("/api/logout", { method: "POST", credentials: "same-origin" });
+      setToken("");
+      showView("login");
+    });
 
     const hostEl = $("custom-host");
     const wrap = document.querySelector(".custom-host-wrap");
@@ -835,7 +1072,7 @@
       return;
     }
 
-    showView("picker");
+    await showOverview();
   }
 
   init();
