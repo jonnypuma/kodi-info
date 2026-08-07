@@ -105,8 +105,6 @@ class OperationStore:
     def get_current(self, server_key: str) -> Optional[Dict[str, Any]]:
         with self._lock:
             current = self._server(server_key).get("current")
-<<<<<<< Updated upstream
-=======
             if current and current.get("state") in {"requested", "running", "accepted"}:
                 try:
                     env_name = (
@@ -130,7 +128,6 @@ class OperationStore:
                         self._save()
                 except (KeyError, TypeError, ValueError):
                     pass
->>>>>>> Stashed changes
             return dict(current) if current else None
 
     def get_history(self, server_key: str, limit: int = 20) -> List[Dict[str, Any]]:

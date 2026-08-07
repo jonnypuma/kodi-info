@@ -109,10 +109,7 @@ class KodiLibraryProbe:
         self.headers = {"Content-Type": "application/json"}
         self.last_error = ""
         self.kodi_version = ""
-<<<<<<< Updated upstream
-=======
         self._scan_status_unavailable = False
->>>>>>> Stashed changes
         
     def connect(self) -> bool:
         """

@@ -263,18 +263,11 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
             message="Kodi accepted the request; completion is not confirmed by HTTP RPC",
         )
         logger.info("Library action accepted: %s → %s", method, target)
-<<<<<<< Updated upstream
-        # Kodi's HTTP JSON-RPC has no portable completion query. Keep the
-        # operation visible as accepted rather than falsely claiming completion.
-=======
->>>>>>> Stashed changes
         try:
             library_actions.record_action(conn["host"], action_key)
         except Exception:
             logger.exception("Could not persist library action (job=%s)", job_id[:8])
 
-<<<<<<< Updated upstream
-=======
         media = "music" if method.startswith("AudioLibrary.") else "video"
         try:
             status_grace = max(10.0, float(os.getenv("LIBRARY_STATUS_GRACE_SECONDS", "300")))
@@ -325,7 +318,6 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
                 return
             time.sleep(5)
 
->>>>>>> Stashed changes
     def _dispatch_library_command(
         method: str, action_key: str, max_wait_s: float
     ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -565,8 +557,6 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
             probe = KodiLibraryProbe(conn["host"], None, conn["username"], conn["password"])
             ok, detail = probe.ping()
             key = _server_key(conn)
-<<<<<<< Updated upstream
-=======
             current_operation = operation_store.get_current(key)
             if current_operation and current_operation.get("state") in {
                 "completed",
@@ -574,7 +564,6 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
                 "timed_out",
             }:
                 current_operation = None
->>>>>>> Stashed changes
             result.append(
                 {
                     "id": preset.get("id"),
@@ -584,11 +573,7 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
                     "detail": detail,
                     "kodi_version": probe.kodi_version or None,
                     "actions": library_actions.get_actions(conn["host"]),
-<<<<<<< Updated upstream
-                    "current_operation": operation_store.get_current(key),
-=======
                     "current_operation": current_operation,
->>>>>>> Stashed changes
                     "history": operation_store.get_history(key, 5),
                 }
             )

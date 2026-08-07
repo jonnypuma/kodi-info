@@ -97,8 +97,6 @@ body {
   font-size: .85rem;
 }
 
-<<<<<<< Updated upstream
-=======
 .server-operation-card {
   display: flex;
   align-items: flex-start;
@@ -129,7 +127,6 @@ body {
   color: var(--text);
 }
 
->>>>>>> Stashed changes
 .operation-status {
   margin: 1rem 0;
   padding: .8rem 1rem;
