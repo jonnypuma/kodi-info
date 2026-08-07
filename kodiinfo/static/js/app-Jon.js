@@ -842,19 +842,9 @@
   ];
 
   async function runOverviewAction(server, endpoint, label, card) {
-<<<<<<< Updated upstream
     const buttons = card.querySelectorAll("button");
     buttons.forEach((button) => { button.disabled = true; });
     const status = card.querySelector(".server-operation-status");
-=======
-    const statusCard = card.querySelector(".server-operation-card");
-    const status = card.querySelector(".server-operation-status");
-    const operation = card.querySelector(".server-current-operation");
-    if (statusCard) {
-      statusCard.hidden = false;
-      statusCard.dataset.dismissed = "false";
-    }
->>>>>>> Stashed changes
     if (status) status.textContent = label + " starting…";
     const body = { preset: String(server.id) };
     const cacheKey = "preset:" + String(server.id);
@@ -874,44 +864,10 @@
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) throw new Error(data.message || ("HTTP " + res.status));
       if (status) status.textContent = label + " accepted · tracking duration";
-<<<<<<< Updated upstream
       setTimeout(() => showOverview(), 1500);
     } catch (error) {
       if (status) status.textContent = label + " failed: " + ((error && error.message) || error);
       buttons.forEach((button) => { button.disabled = false; });
-=======
-      if (operation) operation.textContent = data.operation + " · requested";
-      const poll = async () => {
-        try {
-          const current = await fetch("/api/library-operation-history", {
-            credentials: "same-origin",
-            headers: { "X-Connection-Token": token },
-          });
-          const state = await current.json();
-          const job = state.current;
-          if (job && operation) {
-            operation.textContent = job.operation + " · " + job.state;
-          }
-          if (job && statusCard && statusCard.dataset.dismissed !== "true") {
-            statusCard.hidden = false;
-          }
-          if (job && ["completed", "failed", "timed_out"].includes(job.state)) {
-            if (status) {
-              status.textContent = job.operation + " · " + job.state +
-                (job.message ? " — " + job.message : "");
-            }
-            if (operation) operation.textContent = "";
-            return;
-          }
-          setTimeout(poll, POLL_MS);
-        } catch (error) {
-          setTimeout(poll, POLL_MS);
-        }
-      };
-      setTimeout(poll, POLL_MS);
-    } catch (error) {
-      if (status) status.textContent = label + " failed: " + ((error && error.message) || error);
->>>>>>> Stashed changes
     }
   }
 
@@ -938,35 +894,11 @@
         card.innerHTML =
           "<h2></h2><p class=\"muted\"></p><p class=\"server-state\">" + state +
           (server.kodi_version ? " · " + server.kodi_version : "") + "</p>" +
-<<<<<<< Updated upstream
           (current ? "<p class=\"muted\">" + current.operation + " · " + current.state + "</p>" : "") +
           "<div class=\"server-operation-status\"></div>" +
           "<div class=\"server-actions\"></div>";
         card.querySelector("h2").textContent = server.label || server.host;
         card.querySelector("p.muted").textContent = server.host;
-=======
-          "<p class=\"muted server-current-operation\"></p>" +
-          "<div class=\"server-operation-card\" hidden>" +
-          "<div class=\"server-operation-status\"></div>" +
-          "<button type=\"button\" class=\"server-operation-close\" aria-label=\"Dismiss operation status\">&times;</button>" +
-          "</div>" +
-          "<div class=\"server-actions\"></div>";
-        card.querySelector("h2").textContent = server.label || server.host;
-        card.querySelector("p.muted").textContent = server.host;
-        const operationLine = card.querySelector(".server-current-operation");
-        const operationCard = card.querySelector(".server-operation-card");
-        const operationStatus = card.querySelector(".server-operation-status");
-        if (current) {
-          operationLine.textContent = current.operation + " · " + current.state;
-          operationStatus.textContent = current.operation + " · " + current.state +
-            (current.message ? " — " + current.message : "");
-          operationCard.hidden = false;
-        }
-        card.querySelector(".server-operation-close").addEventListener("click", () => {
-          operationCard.dataset.dismissed = "true";
-          operationCard.hidden = true;
-        });
->>>>>>> Stashed changes
         const actions = card.querySelector(".server-actions");
         const open = document.createElement("button");
         open.type = "button";

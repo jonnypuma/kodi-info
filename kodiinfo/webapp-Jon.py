@@ -263,69 +263,13 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
             message="Kodi accepted the request; completion is not confirmed by HTTP RPC",
         )
         logger.info("Library action accepted: %s → %s", method, target)
-<<<<<<< Updated upstream
         # Kodi's HTTP JSON-RPC has no portable completion query. Keep the
         # operation visible as accepted rather than falsely claiming completion.
-=======
->>>>>>> Stashed changes
         try:
             library_actions.record_action(conn["host"], action_key)
         except Exception:
             logger.exception("Could not persist library action (job=%s)", job_id[:8])
 
-<<<<<<< Updated upstream
-=======
-        media = "music" if method.startswith("AudioLibrary.") else "video"
-        try:
-            status_grace = max(10.0, float(os.getenv("LIBRARY_STATUS_GRACE_SECONDS", "300")))
-            status_timeout = max(status_grace, float(os.getenv("LIBRARY_STATUS_TIMEOUT_SECONDS", "1800")))
-        except ValueError:
-            status_grace, status_timeout = 300.0, 1800.0
-        status_started = time.time()
-        observed_scanning = False
-        last_scan_seen = None
-        while True:
-            scan_status = probe.get_scan_status(media)
-            elapsed = time.time() - status_started
-            if scan_status is True:
-                observed_scanning = True
-                last_scan_seen = time.time()
-                operation_store.update(
-                    server_key,
-                    job_id,
-                    state="running",
-                    message=f"Kodi is scanning the {media} library",
-                )
-            elif observed_scanning and scan_status is False:
-                operation_store.update(
-                    server_key,
-                    job_id,
-                    state="completed",
-                    message="Kodi reports that the library scan has finished",
-                )
-                logger.info("Library action completed: %s → %s", method, target)
-                return
-            elif not observed_scanning and elapsed >= status_grace:
-                operation_store.update(
-                    server_key,
-                    job_id,
-                    state="completed",
-                    message="Kodi accepted the request; scan completion could not be confirmed",
-                )
-                logger.info("Library action status expired: %s → %s", method, target)
-                return
-            elif observed_scanning and last_scan_seen is not None and time.time() - last_scan_seen >= status_timeout:
-                operation_store.update(
-                    server_key,
-                    job_id,
-                    state="timed_out",
-                    message="Timed out waiting for Kodi to report the scan as finished",
-                )
-                logger.warning("Library action status timed out: %s → %s", method, target)
-                return
-            time.sleep(5)
-
->>>>>>> Stashed changes
     def _dispatch_library_command(
         method: str, action_key: str, max_wait_s: float
     ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -565,16 +509,6 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
             probe = KodiLibraryProbe(conn["host"], None, conn["username"], conn["password"])
             ok, detail = probe.ping()
             key = _server_key(conn)
-<<<<<<< Updated upstream
-=======
-            current_operation = operation_store.get_current(key)
-            if current_operation and current_operation.get("state") in {
-                "completed",
-                "failed",
-                "timed_out",
-            }:
-                current_operation = None
->>>>>>> Stashed changes
             result.append(
                 {
                     "id": preset.get("id"),
@@ -584,11 +518,7 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
                     "detail": detail,
                     "kodi_version": probe.kodi_version or None,
                     "actions": library_actions.get_actions(conn["host"]),
-<<<<<<< Updated upstream
                     "current_operation": operation_store.get_current(key),
-=======
-                    "current_operation": current_operation,
->>>>>>> Stashed changes
                     "history": operation_store.get_history(key, 5),
                 }
             )

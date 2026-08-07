@@ -109,10 +109,6 @@ class KodiLibraryProbe:
         self.headers = {"Content-Type": "application/json"}
         self.last_error = ""
         self.kodi_version = ""
-<<<<<<< Updated upstream
-=======
-        self._scan_status_unavailable = False
->>>>>>> Stashed changes
         
     def connect(self) -> bool:
         """
@@ -222,22 +218,6 @@ class KodiLibraryProbe:
         except Exception as e:
             logger.warning("RPC request failed for %s at %s: %s", method, self.base_url, e)
             return {}
-
-    def get_scan_status(self, media: str) -> Optional[bool]:
-        """Return Kodi's scan flag, or None when this Kodi does not expose it."""
-        if self._scan_status_unavailable:
-            return None
-        boolean = "Library.IsScanningMusic" if media == "music" else "Library.IsScanningVideo"
-        result = self._make_request(
-            "XBMC.GetInfoBooleans",
-            {"booleans": [boolean]},
-            timeout=10,
-        )
-        values = result.get("result")
-        if not isinstance(values, dict) or boolean not in values:
-            self._scan_status_unavailable = True
-            return None
-        return bool(values[boolean])
     
     def get_movie_statistics(self) -> tuple[int, int]:
         """

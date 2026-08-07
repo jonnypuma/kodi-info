@@ -105,6 +105,32 @@ class OperationStore:
     def get_current(self, server_key: str) -> Optional[Dict[str, Any]]:
         with self._lock:
             current = self._server(server_key).get("current")
+<<<<<<< Updated upstream
+=======
+            if current and current.get("state") in {"requested", "running", "accepted"}:
+                try:
+                    env_name = (
+                        "LIBRARY_STATUS_GRACE_SECONDS"
+                        if current.get("state") == "accepted"
+                        else "LIBRARY_STATUS_TIMEOUT_SECONDS"
+                    )
+                    default_timeout = "300" if env_name.endswith("GRACE_SECONDS") else "1800"
+                    timeout = max(60.0, float(os.getenv(env_name, default_timeout)))
+                    updated = datetime.fromisoformat(current["updated_at"]).timestamp()
+                    if time.time() - updated > timeout:
+                        current.update(
+                            {
+                                "state": "completed",
+                                "message": "Operation status expired; Kodi completion could not be confirmed",
+                                "finished_at": utc_now(),
+                                "updated_at": utc_now(),
+                                "elapsed_seconds": int(time.time() - datetime.fromisoformat(current["started_at"]).timestamp()),
+                            }
+                        )
+                        self._save()
+                except (KeyError, TypeError, ValueError):
+                    pass
+>>>>>>> Stashed changes
             return dict(current) if current else None
 
     def get_history(self, server_key: str, limit: int = 20) -> List[Dict[str, Any]]:

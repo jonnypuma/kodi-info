@@ -97,39 +97,6 @@ body {
   font-size: .85rem;
 }
 
-<<<<<<< Updated upstream
-=======
-.server-operation-card {
-  display: flex;
-  align-items: flex-start;
-  gap: .75rem;
-  margin-top: .8rem;
-  padding: .75rem .85rem;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: rgba(0, 0, 0, .24);
-}
-
-.server-operation-card .server-operation-status {
-  flex: 1;
-  margin: 0;
-}
-
-.server-operation-close {
-  flex: 0 0 auto;
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: 1.25rem;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.server-operation-close:hover {
-  color: var(--text);
-}
-
->>>>>>> Stashed changes
 .operation-status {
   margin: 1rem 0;
   padding: .8rem 1rem;

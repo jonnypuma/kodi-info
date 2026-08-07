@@ -38,7 +38,15 @@ services:
       - BASIC_AUTH=${BASIC_AUTH:-}
       # INFO, DEBUG, or TRACE (default INFO)
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+<<<<<<< Updated upstream
       - WEB_PORT=5005
+=======
+      # Scan status probing: accepted state grace period and hard timeout.
+      - LIBRARY_STATUS_GRACE_SECONDS=${LIBRARY_STATUS_GRACE_SECONDS:-300}
+      - LIBRARY_STATUS_TIMEOUT_SECONDS=${LIBRARY_STATUS_TIMEOUT_SECONDS:-1800}
+      - WEB_PORT=5005
+      - BASIC_AUTH=admin:admin #default, change to personal password
+>>>>>>> Stashed changes
     env_file:
       - ./.env
     volumes:

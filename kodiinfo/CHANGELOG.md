@@ -11,4 +11,8 @@
 - Added Waitress for production web serving.
 - Added startup validation warnings for invalid and duplicate preset endpoints.
 - Added operational status and diagnostics APIs.
+<<<<<<< Updated upstream
+=======
+- Added Kodi scan-status probing with bounded accepted-state expiry.
+>>>>>>> Stashed changes
 - Added tests and documentation for the 1.0.0 configuration and operation semantics.
