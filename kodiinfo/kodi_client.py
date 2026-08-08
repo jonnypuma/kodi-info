@@ -168,7 +168,7 @@ class KodiLibraryProbe:
                 self.last_error = f"Unable to reach {self.base_url}: {err_text}"
             return False
     
-    def ping(self) -> Tuple[bool, str]:
+    def ping(self, timeout: float = 10) -> Tuple[bool, str]:
         """
         Ping the Kodi server to check if it's reachable
         
@@ -182,9 +182,9 @@ class KodiLibraryProbe:
                 "params": {"properties": ["version"]},
                 "id": 1
             }
-            
+            probe_timeout = (max(1.0, float(timeout)), max(1.0, float(timeout)))
             response = requests.post(self.base_url, headers=self.headers, json=payload,
-                                   auth=self.auth, timeout=10)
+                                   auth=self.auth, timeout=probe_timeout)
             response.raise_for_status()
             result = response.json()
             

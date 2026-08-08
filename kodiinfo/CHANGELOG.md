@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Server overview probes all configured Kodi servers in parallel with a shorter default timeout, so unreachable hosts no longer block the page for tens of seconds.
+
 ## 1.0.0 - 2026-08-02
 
 - Added a server overview with reachability, Kodi version, active operation, and recent history.

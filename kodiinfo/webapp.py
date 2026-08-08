@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -543,41 +544,78 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
         payload = [{"id": p["id"], "label": p["label"], "host": p["host"]} for p in preset_servers]
         return jsonify({"servers": payload})
 
+    def _overview_probe_timeout() -> float:
+        try:
+            return max(1.0, float(os.getenv("OVERVIEW_PROBE_TIMEOUT_SECONDS", "3")))
+        except ValueError:
+            return 3.0
+
+    def _probe_overview_server(preset: Dict[str, Any], timeout: float) -> Dict[str, Any]:
+        conn = {
+            "host": preset["host"],
+            "username": preset.get("username") or "",
+            "password": preset.get("password") or "",
+            "label": preset.get("label") or preset["host"],
+            "preset_id": preset.get("id"),
+        }
+        probe = KodiLibraryProbe(conn["host"], None, conn["username"], conn["password"])
+        ok, detail = probe.ping(timeout=timeout)
+        key = _server_key(conn)
+        current_operation = operation_store.get_current(key)
+        if current_operation and current_operation.get("state") in {
+            "completed",
+            "failed",
+            "timed_out",
+        }:
+            current_operation = None
+        return {
+            "id": preset.get("id"),
+            "label": conn["label"],
+            "host": conn["host"],
+            "reachable": bool(ok),
+            "detail": detail,
+            "kodi_version": probe.kodi_version or None,
+            "actions": library_actions.get_actions(conn["host"]),
+            "current_operation": current_operation,
+            "history": operation_store.get_history(key, 5),
+        }
+
     @app.route("/api/server-overview")
     def server_overview():
-        result = []
-        for preset in preset_servers:
-            conn = {
-                "host": preset["host"],
-                "username": preset.get("username") or "",
-                "password": preset.get("password") or "",
-                "label": preset.get("label") or preset["host"],
-                "preset_id": preset.get("id"),
+        timeout = _overview_probe_timeout()
+        if not preset_servers:
+            return jsonify({"success": True, "servers": []})
+
+        result: list[Optional[Dict[str, Any]]] = [None] * len(preset_servers)
+        workers = min(len(preset_servers), 10)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(_probe_overview_server, preset, timeout): idx
+                for idx, preset in enumerate(preset_servers)
             }
-            probe = KodiLibraryProbe(conn["host"], None, conn["username"], conn["password"])
-            ok, detail = probe.ping()
-            key = _server_key(conn)
-            current_operation = operation_store.get_current(key)
-            if current_operation and current_operation.get("state") in {
-                "completed",
-                "failed",
-                "timed_out",
-            }:
-                current_operation = None
-            result.append(
-                {
-                    "id": preset.get("id"),
-                    "label": conn["label"],
-                    "host": conn["host"],
-                    "reachable": bool(ok),
-                    "detail": detail,
-                    "kodi_version": probe.kodi_version or None,
-                    "actions": library_actions.get_actions(conn["host"]),
-                    "current_operation": current_operation,
-                    "history": operation_store.get_history(key, 5),
-                }
-            )
-        return jsonify({"success": True, "servers": result})
+            for future in as_completed(futures):
+                idx = futures[future]
+                preset = preset_servers[idx]
+                try:
+                    result[idx] = future.result()
+                except Exception as exc:
+                    logger.warning(
+                        "Server overview probe failed for %s: %s",
+                        preset.get("label") or preset.get("host"),
+                        exc,
+                    )
+                    result[idx] = {
+                        "id": preset.get("id"),
+                        "label": preset.get("label") or preset.get("host"),
+                        "host": preset.get("host"),
+                        "reachable": False,
+                        "detail": str(exc),
+                        "kodi_version": None,
+                        "actions": library_actions.get_actions(preset.get("host") or ""),
+                        "current_operation": None,
+                        "history": [],
+                    }
+        return jsonify({"success": True, "servers": [item for item in result if item]})
 
     @app.route("/api/ensure-connection", methods=["POST"])
     def api_ensure_connection():
@@ -867,25 +905,39 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
                 }
             )
         errors = []
-        for p in preset_servers:
+        timeout = _overview_probe_timeout()
+        workers = min(len(preset_servers), 10)
+
+        def _probe_ready(preset: Dict[str, Any]) -> Tuple[bool, str, str]:
             conn = {
-                "host": p["host"],
-                "username": p.get("username") or "",
-                "password": p.get("password") or "",
+                "host": preset["host"],
+                "username": preset.get("username") or "",
+                "password": preset.get("password") or "",
             }
             probe = KodiLibraryProbe(conn["host"], None, conn["username"], conn["password"])
-            ok, detail = probe.ping()
-            if ok:
-                return jsonify(
-                    {
-                        "status": "ready",
-                        "kodi": "ok",
-                        "server": p.get("label") or p["host"],
-                        "detail": detail,
-                        "timestamp": datetime.now().isoformat(),
-                    }
-                )
-            errors.append(f"{p.get('label') or p['host']}: {detail}")
+            ok, detail = probe.ping(timeout=timeout)
+            label = preset.get("label") or preset["host"]
+            return ok, label, detail
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_probe_ready, p) for p in preset_servers]
+            for future in as_completed(futures):
+                try:
+                    ok, label, detail = future.result()
+                except Exception as exc:
+                    errors.append(f"probe error: {exc}")
+                    continue
+                if ok:
+                    return jsonify(
+                        {
+                            "status": "ready",
+                            "kodi": "ok",
+                            "server": label,
+                            "detail": detail,
+                            "timestamp": datetime.now().isoformat(),
+                        }
+                    )
+                errors.append(f"{label}: {detail}")
         return (
             jsonify(
                 {

@@ -28,6 +28,7 @@ The UI stays at `/` and loads data via `/api/*` — no `document.write` dashboar
 - **Per-server dashboard cache** (browser IndexedDB, 3-day TTL): switching servers reuses last loaded stats instantly; **Refresh** forces a live reload
 - `/health` (liveness) and `/ready` (tries configured Kodi presets)
 - Server overview with reachability, Kodi version, active operation, and recent operation history
+- Parallel server reachability probes with a short configurable timeout (`OVERVIEW_PROBE_TIMEOUT_SECONDS`, default 3s)
 - Durable per-server operation state in `output/library_operations.json`
 - Optional web login using `BASIC_AUTH=username:password`
 - Configurable `LOG_LEVEL=INFO|DEBUG|TRACE`; routine Werkzeug access logs are hidden at INFO
@@ -61,6 +62,9 @@ BASIC_AUTH=admin:change-me
 
 # INFO (default), DEBUG, or TRACE
 LOG_LEVEL=INFO
+
+# Server overview reachability probe timeout in seconds (default 3).
+OVERVIEW_PROBE_TIMEOUT_SECONDS=3
 
 WEB_PORT=5005
 ```
