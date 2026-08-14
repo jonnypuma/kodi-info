@@ -12,7 +12,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from kodi_client import canonical_server_key
+
 logger = logging.getLogger(__name__)
+
+_ACTIVE_STATES = {"requested", "running", "accepted"}
+
+
+def _enrich_elapsed(item: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        started = datetime.fromisoformat(item["started_at"]).timestamp()
+        if item.get("finished_at"):
+            ended = datetime.fromisoformat(item["finished_at"]).timestamp()
+            item["elapsed_seconds"] = max(0, int(ended - started))
+        elif item.get("state") in _ACTIVE_STATES:
+            item["elapsed_seconds"] = max(0, int(time.time() - started))
+    except (KeyError, TypeError, ValueError):
+        pass
+    return item
 
 
 def utc_now() -> str:
@@ -32,6 +49,43 @@ class OperationStore:
 
         with self._lock:
             self._load()
+            self._migrate_server_keys()
+
+    def _migrate_server_keys(self) -> None:
+        servers = self._data.get("servers", {})
+        if not servers:
+            return
+        migrated: Dict[str, Dict[str, Any]] = {}
+        changed = False
+        for key, value in servers.items():
+            new_key = canonical_server_key(str(key))
+            if new_key != key:
+                changed = True
+            bucket = migrated.setdefault(new_key, {"current": None, "history": []})
+            incoming = value.get("current")
+            existing = bucket.get("current")
+            if incoming and (
+                not existing
+                or (
+                    incoming.get("state") in _ACTIVE_STATES
+                    and existing.get("state") not in _ACTIVE_STATES
+                )
+                or (incoming.get("updated_at") or "") > (existing.get("updated_at") or "")
+            ):
+                bucket["current"] = incoming
+            seen = {item.get("job_id") for item in bucket.get("history", [])}
+            merged_history = list(bucket.get("history", []))
+            for item in value.get("history", []):
+                job_id = item.get("job_id")
+                if job_id in seen:
+                    continue
+                merged_history.append(item)
+                seen.add(job_id)
+            merged_history.sort(key=lambda row: row.get("started_at") or "", reverse=True)
+            bucket["history"] = merged_history[: self.history_limit]
+        if changed or migrated != servers:
+            self._data["servers"] = migrated
+            self._save()
 
     def _load(self) -> None:
         if not self.path.exists():
@@ -107,25 +161,50 @@ class OperationStore:
             current = self._server(server_key).get("current")
             if current and current.get("state") in {"requested", "running", "accepted"}:
                 try:
-                    env_name = (
-                        "LIBRARY_STATUS_GRACE_SECONDS"
-                        if current.get("state") == "accepted"
-                        else "LIBRARY_STATUS_TIMEOUT_SECONDS"
-                    )
-                    default_timeout = "300" if env_name.endswith("GRACE_SECONDS") else "1800"
-                    timeout = max(60.0, float(os.getenv(env_name, default_timeout)))
-                    updated = datetime.fromisoformat(current["updated_at"]).timestamp()
-                    if time.time() - updated > timeout:
-                        current.update(
-                            {
-                                "state": "completed",
-                                "message": "Operation status expired; Kodi completion could not be confirmed",
-                                "finished_at": utc_now(),
-                                "updated_at": utc_now(),
-                                "elapsed_seconds": int(time.time() - datetime.fromisoformat(current["started_at"]).timestamp()),
-                            }
-                        )
-                        self._save()
+                    started = datetime.fromisoformat(current["started_at"]).timestamp()
+                    current["elapsed_seconds"] = max(0, int(time.time() - started))
+                except (KeyError, TypeError, ValueError):
+                    pass
+                try:
+                    state = current.get("state")
+                    if state == "running":
+                        pass
+                    elif state == "accepted":
+                        env_name = "LIBRARY_STATUS_GRACE_SECONDS"
+                        default_timeout = "7200"
+                        timeout = max(60.0, float(os.getenv(env_name, default_timeout)))
+                        updated = datetime.fromisoformat(current["updated_at"]).timestamp()
+                        if time.time() - updated > timeout:
+                            current.update(
+                                {
+                                    "state": "completed",
+                                    "message": "Operation status expired; Kodi completion could not be confirmed",
+                                    "finished_at": utc_now(),
+                                    "updated_at": utc_now(),
+                                    "elapsed_seconds": int(
+                                        time.time()
+                                        - datetime.fromisoformat(current["started_at"]).timestamp()
+                                    ),
+                                }
+                            )
+                            self._save()
+                    elif state == "requested":
+                        timeout = max(120.0, float(os.getenv("LIBRARY_STATUS_TIMEOUT_SECONDS", "1800")))
+                        updated = datetime.fromisoformat(current["updated_at"]).timestamp()
+                        if time.time() - updated > timeout:
+                            current.update(
+                                {
+                                    "state": "failed",
+                                    "message": "Operation never started after restart",
+                                    "finished_at": utc_now(),
+                                    "updated_at": utc_now(),
+                                    "elapsed_seconds": int(
+                                        time.time()
+                                        - datetime.fromisoformat(current["started_at"]).timestamp()
+                                    ),
+                                }
+                            )
+                            self._save()
                 except (KeyError, TypeError, ValueError):
                     pass
             return dict(current) if current else None
@@ -133,6 +212,35 @@ class OperationStore:
     def get_history(self, server_key: str, limit: int = 20) -> List[Dict[str, Any]]:
         with self._lock:
             return [dict(x) for x in self._server(server_key).get("history", [])[:limit]]
+
+    def find_for_host(self, host: str, history_limit: int = 20) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Read operation state for a host without mutating stored job state."""
+        target = canonical_server_key(str(host or ""))
+        current: Optional[Dict[str, Any]] = None
+        history: List[Dict[str, Any]] = []
+        seen_jobs = set()
+        with self._lock:
+            for stored_key, bucket in self._data.get("servers", {}).items():
+                if canonical_server_key(stored_key) != target:
+                    continue
+                raw_current = bucket.get("current")
+                if raw_current:
+                    item = _enrich_elapsed(dict(raw_current))
+                    if not current or (item.get("updated_at") or "") > (current.get("updated_at") or ""):
+                        current = item
+                for row in bucket.get("history", []):
+                    job_id = row.get("job_id")
+                    if job_id in seen_jobs:
+                        continue
+                    history.append(_enrich_elapsed(dict(row)))
+                    seen_jobs.add(job_id)
+        history.sort(key=lambda row: row.get("started_at") or "", reverse=True)
+        if not current:
+            for item in history:
+                if item.get("state") in _ACTIVE_STATES:
+                    current = item
+                    break
+        return current, history[:history_limit]
 
     def all_servers(self) -> Dict[str, Dict[str, Any]]:
         with self._lock:
@@ -162,6 +270,10 @@ def get_current(server_key: str) -> Optional[Dict[str, Any]]:
 
 def get_history(server_key: str, limit: int = 20) -> List[Dict[str, Any]]:
     return _store.get_history(server_key, limit)
+
+
+def find_for_host(host: str, history_limit: int = 20) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    return _store.find_for_host(host, history_limit=history_limit)
 
 
 def all_servers() -> Dict[str, Dict[str, Any]]:

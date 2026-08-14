@@ -643,6 +643,15 @@ def _slot_kodi_credentials(slot_index: Optional[int]) -> Tuple[str, str]:
     return user, pwd
 
 
+def canonical_server_key(host: str, port: Optional[int] = None, scheme: str = "") -> str:
+    """Stable per-server identity for persisted state (scheme://host:port)."""
+    probe = KodiLibraryProbe(host, port, "", "")
+    sch = (scheme or probe.scheme or "http").strip().lower()
+    if sch not in ("http", "https"):
+        sch = probe.scheme or "http"
+    return f"{sch}://{probe.host}:{probe.port}"
+
+
 def collect_preset_kodi_servers() -> List[Dict[str, str]]:
     """
     Each non-empty Kodi target is its own preset (dropdown row). No merging.

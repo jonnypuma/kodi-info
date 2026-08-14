@@ -34,6 +34,14 @@ services:
       - WEB_SECRET_KEY=${WEB_SECRET_KEY:-}
       # Default recently-added count (UI dropdown can still pick 5/10/20/50)
       - RECENT_LIMIT=${RECENT_LIMIT:-10}
+      - BASIC_AUTH=${BASIC_AUTH:-}
+      # INFO, DEBUG, or TRACE (default INFO)
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Scan status probing: accepted state grace period and hard timeout.
+      - LIBRARY_STATUS_GRACE_SECONDS=${LIBRARY_STATUS_GRACE_SECONDS:-7200}
+      - LIBRARY_STATUS_TIMEOUT_SECONDS=${LIBRARY_STATUS_TIMEOUT_SECONDS:-86400}
+      # Per-server reachability probe timeout on the overview page (seconds).
+      - OVERVIEW_PROBE_TIMEOUT_SECONDS=${OVERVIEW_PROBE_TIMEOUT_SECONDS:-3}
       - WEB_PORT=5005
     env_file:
       - ./.env

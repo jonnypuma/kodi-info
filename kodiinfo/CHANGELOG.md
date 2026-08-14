@@ -3,6 +3,14 @@
 ## Unreleased
 
 - Server overview probes all configured Kodi servers in parallel with a shorter default timeout, so unreachable hosts no longer block the page for tens of seconds.
+- Server overview now refreshes reachability every 30 seconds and when the browser tab becomes visible again.
+- Operation status cards keep long error messages contained within the server column; the dismiss button stays visible.
+- Library action timestamps now use a canonical server key so scan/clean history survives host-format differences and container rebuilds.
+- In-progress library operations resume automatically after container restarts.
+- Dashboard operation timers and last-scan metadata refresh correctly when reopening a cached server.
+- Dashboard operation status now resolves active scans using the connection token, preset id, and migrated server keys.
+- Scan monitoring defaults raised for slow devices (2h grace, 24h idle timeout) and scans without Kodi status reporting stay active for the full run.
+- Dashboard scan status and history now use the same preset-based operation lookup as the server overview.
 
 ## 1.0.0 - 2026-08-02
 

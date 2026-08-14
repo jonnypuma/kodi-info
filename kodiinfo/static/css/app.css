@@ -55,11 +55,18 @@ body {
 .server-overview-card {
   width: auto;
   padding: 1.25rem;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .server-overview-card .server-state {
   color: var(--muted);
   margin: .5rem 0 1rem;
+}
+
+.server-overview-card .server-current-operation {
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .server-overview-card.online .server-state { color: var(--ok); }
@@ -100,26 +107,40 @@ body {
 .server-operation-card {
   display: flex;
   align-items: flex-start;
-  gap: .75rem;
+  gap: .5rem;
   margin-top: .8rem;
   padding: .75rem .85rem;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: rgba(0, 0, 0, .24);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.server-operation-card.is-failed {
+  border-color: rgba(239, 91, 107, 0.45);
 }
 
 .server-operation-card .server-operation-status {
-  flex: 1;
+  flex: 1 1 auto;
   margin: 0;
+  min-width: 0;
+  max-height: 5.5rem;
+  overflow-y: auto;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .server-operation-close {
   flex: 0 0 auto;
+  flex-shrink: 0;
+  align-self: flex-start;
   border: 0;
   background: transparent;
   color: var(--muted);
   font-size: 1.25rem;
   line-height: 1;
+  padding: 0 0 0 .25rem;
   cursor: pointer;
 }
 

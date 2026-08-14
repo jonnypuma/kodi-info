@@ -14,7 +14,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
@@ -28,8 +28,10 @@ from kodi_client import (
     LibraryStats,
     RecentlyAdded,
     _watched_episodes_paginated,
+    canonical_server_key,
     clamp_recent_limit,
     collect_preset_kodi_servers,
+    connection_dict_for_preset,
     recent_limit_from_env,
     resolve_start_load_connection,
     stats_to_dict,
@@ -40,6 +42,12 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent
 APP_VERSION = "1.0.0"
 TRACE_LEVEL = 5
+LIBRARY_COMMANDS = {
+    "VideoLibrary.Scan": ("video_scan", 60.0),
+    "AudioLibrary.Scan": ("audio_scan", 60.0),
+    "VideoLibrary.Clean": ("video_clean", 120.0),
+    "AudioLibrary.Clean": ("music_clean", 120.0),
+}
 logging.addLevelName(TRACE_LEVEL, "TRACE")
 
 
@@ -184,14 +192,113 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
 
     def _server_key(conn: Dict[str, Any]) -> str:
         """Stable identity used for persisted per-server state."""
-        scheme = str(conn.get("scheme") or "").lower()
-        host = str(conn.get("host") or "").strip().lower()
-        if "://" in host:
-            scheme, host = host.split("://", 1)
-        port = conn.get("port")
-        if port:
-            return f"{scheme or 'http'}://{host}:{port}"
-        return f"{scheme or 'http'}://{host}"
+        return canonical_server_key(
+            str(conn.get("host") or ""),
+            conn.get("port"),
+            str(conn.get("scheme") or ""),
+        )
+
+    def _conn_from_operation(server_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        preset_id = server_info.get("preset_id")
+        if preset_id is not None and str(preset_id).strip() != "":
+            for preset in preset_servers:
+                if str(preset.get("id")) == str(preset_id):
+                    return connection_dict_for_preset(preset)
+        host = str(server_info.get("host") or "").strip()
+        if not host:
+            return None
+        target_key = canonical_server_key(host)
+        for preset in preset_servers:
+            if canonical_server_key(preset["host"]) == target_key:
+                return connection_dict_for_preset(preset)
+        return {
+            "host": host,
+            "username": "",
+            "password": "",
+            "label": server_info.get("label") or host,
+            "preset_id": preset_id,
+        }
+
+    def _resume_in_progress_operations() -> None:
+        for server_key, bucket in operation_store.all_servers().items():
+            current = bucket.get("current")
+            if not current or current.get("state") not in {"requested", "running", "accepted"}:
+                continue
+            method = str(current.get("operation") or "")
+            command = LIBRARY_COMMANDS.get(method)
+            if not command:
+                continue
+            action_key, max_wait = command
+            conn = _conn_from_operation(current.get("server") or {})
+            if not conn:
+                logger.warning(
+                    "Cannot resume library operation %s for %s — missing connection",
+                    (current.get("job_id") or "")[:8],
+                    server_key,
+                )
+                continue
+            job = dict(current)
+            job["server_key"] = server_key
+            logger.info(
+                "Resuming library operation %s (%s) for %s",
+                (job.get("job_id") or "")[:8],
+                method,
+                _server_log_label(conn),
+            )
+            threading.Thread(
+                target=_run_library_job,
+                args=(job, dict(conn), method, action_key, max_wait),
+                kwargs={"resume_monitor_only": True},
+                daemon=True,
+            ).start()
+
+    def _operation_state_for_conn(conn: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+        current, history = operation_store.find_for_host(str(conn.get("host") or ""))
+        if current and current.get("state") in {"completed", "failed", "timed_out"}:
+            current = None
+        return current, history
+
+    def _operation_json(conn: Dict[str, Any]) -> Dict[str, Any]:
+        current, history = _operation_state_for_conn(conn)
+        return {"current_operation": current, "operation_history": history}
+
+    def _preset_conn(preset_id: str) -> Optional[Dict[str, Any]]:
+        for preset in preset_servers:
+            if str(preset.get("id")) == str(preset_id):
+                return {
+                    "host": preset["host"],
+                    "username": preset.get("username") or "",
+                    "password": preset.get("password") or "",
+                    "label": preset.get("label") or preset["host"],
+                    "preset_id": preset.get("id"),
+                }
+        return None
+
+    def _conn_for_operation_lookup() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        preset_id = (request.args.get("preset") or "").strip()
+        if preset_id:
+            for preset in preset_servers:
+                if str(preset.get("id")) == preset_id:
+                    return connection_dict_for_preset(preset), None
+        host = (request.args.get("host") or "").strip()
+        if host:
+            return {
+                "host": host,
+                "username": "",
+                "password": "",
+                "label": host,
+                "preset_id": None,
+            }, None
+        tok = _token_from_request()
+        conn = None
+        err = None
+        if tok:
+            conn, err = _conn_from_token()
+            if conn:
+                return conn, None
+        if tok:
+            return None, err or "Connection token expired or invalid"
+        return None, err or "Missing connection token — open the home page and choose a server"
 
     def _server_target(conn: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -239,6 +346,7 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
         method: str,
         action_key: str,
         max_wait_s: float,
+        resume_monitor_only: bool = False,
     ) -> None:
         server_key = job["server_key"]
         job_id = job["job_id"]
@@ -246,38 +354,51 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
         probe = KodiLibraryProbe(
             conn["host"], None, conn.get("username") or "", conn.get("password") or ""
         )
-        operation_store.update(server_key, job_id, state="running", message="Contacting Kodi")
-        response, err = _kodi_rpc_post(probe, method, read_timeout=max_wait_s)
-        if err:
-            logger.warning("Library action failed: %s → %s — %s", method, target, err)
+        media = "music" if method.startswith("AudioLibrary.") else "video"
+        try:
+            status_grace = max(60.0, float(os.getenv("LIBRARY_STATUS_GRACE_SECONDS", "7200")))
+            status_timeout = max(status_grace, float(os.getenv("LIBRARY_STATUS_TIMEOUT_SECONDS", "86400")))
+        except ValueError:
+            status_grace, status_timeout = 7200.0, 86400.0
+
+        if resume_monitor_only:
+            prior_state = str(job.get("state") or "")
+            observed_scanning = prior_state == "running"
+            last_scan_seen = time.time() if observed_scanning else None
+            status_started = time.time()
             operation_store.update(
                 server_key,
                 job_id,
-                state="timed_out" if err == "timeout" else "failed",
-                message=err,
+                message=job.get("message") or "Resuming operation monitor after restart",
             )
-            return
-        operation_store.update(
-            server_key,
-            job_id,
-            state="accepted",
-            message="Kodi accepted the request; completion is not confirmed by HTTP RPC",
-        )
-        logger.info("Library action accepted: %s → %s", method, target)
-        try:
-            library_actions.record_action(conn["host"], action_key)
-        except Exception:
-            logger.exception("Could not persist library action (job=%s)", job_id[:8])
+            logger.info("Resumed library operation monitor: %s → %s", method, target)
+        else:
+            operation_store.update(server_key, job_id, state="running", message="Contacting Kodi")
+            response, err = _kodi_rpc_post(probe, method, read_timeout=max_wait_s)
+            if err:
+                logger.warning("Library action failed: %s → %s — %s", method, target, err)
+                operation_store.update(
+                    server_key,
+                    job_id,
+                    state="timed_out" if err == "timeout" else "failed",
+                    message=err,
+                )
+                return
+            operation_store.update(
+                server_key,
+                job_id,
+                state="accepted",
+                message="Kodi accepted the request; completion is not confirmed by HTTP RPC",
+            )
+            logger.info("Library action accepted: %s → %s", method, target)
+            try:
+                library_actions.record_action(conn["host"], action_key)
+            except Exception:
+                logger.exception("Could not persist library action (job=%s)", job_id[:8])
+            status_started = time.time()
+            observed_scanning = False
+            last_scan_seen = None
 
-        media = "music" if method.startswith("AudioLibrary.") else "video"
-        try:
-            status_grace = max(10.0, float(os.getenv("LIBRARY_STATUS_GRACE_SECONDS", "300")))
-            status_timeout = max(status_grace, float(os.getenv("LIBRARY_STATUS_TIMEOUT_SECONDS", "1800")))
-        except ValueError:
-            status_grace, status_timeout = 300.0, 1800.0
-        status_started = time.time()
-        observed_scanning = False
-        last_scan_seen = None
         while True:
             scan_status = probe.get_scan_status(media)
             elapsed = time.time() - status_started
@@ -299,6 +420,20 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
                 )
                 logger.info("Library action completed: %s → %s", method, target)
                 return
+            elif scan_status is None and probe._scan_status_unavailable:
+                if not observed_scanning and elapsed >= status_grace:
+                    observed_scanning = True
+                if observed_scanning:
+                    last_scan_seen = time.time()
+                    operation_store.update(
+                        server_key,
+                        job_id,
+                        state="running",
+                        message=(
+                            f"Kodi is scanning the {media} library "
+                            "(Kodi does not report scan progress)"
+                        ),
+                    )
             elif not observed_scanning and elapsed >= status_grace:
                 operation_store.update(
                     server_key,
@@ -464,8 +599,9 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
             update_job(job_id, 95, "Packaging")
             artwork_base = f"{probe.scheme}://{probe.host}:{probe.port}"
             payload = stats_to_dict(stats, probe, artwork_base, recent_limit)
-            host_key = conn.get("host") or artwork_base
+            host_key = canonical_server_key(conn.get("host") or artwork_base)
             actions = library_actions.get_actions(host_key)
+            op_current, op_history = _operation_state_for_conn(conn)
             label = conn.get("label") or host_key
             display = f"{label} — {host_key}" if label and label != host_key else host_key
             last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -480,6 +616,8 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
                         "label": label,
                         "last_updated": last_updated,
                         "library_actions": actions,
+                        "current_operation": op_current,
+                        "operation_history": op_history,
                         "recent_limit": recent_limit,
                         "default_recent_limit": recent_limit_from_env(),
                     }
@@ -560,8 +698,7 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
         }
         probe = KodiLibraryProbe(conn["host"], None, conn["username"], conn["password"])
         ok, detail = probe.ping(timeout=timeout)
-        key = _server_key(conn)
-        current_operation = operation_store.get_current(key)
+        current_operation, history = _operation_state_for_conn(conn)
         if current_operation and current_operation.get("state") in {
             "completed",
             "failed",
@@ -577,7 +714,7 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
             "kodi_version": probe.kodi_version or None,
             "actions": library_actions.get_actions(conn["host"]),
             "current_operation": current_operation,
-            "history": operation_store.get_history(key, 5),
+            "history": history[:5],
         }
 
     @app.route("/api/server-overview")
@@ -624,6 +761,7 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
         Used when serving a cached dashboard so Scan/Clean/Refresh still work.
         """
         data = request.get_json(silent=True) or {}
+        resolved_conn, _ = resolve_start_load_connection(data, preset_servers)
         tok = (data.get("connection_token") or "").strip()
         if tok:
             conn = connection_tokens.get_connection(tok)
@@ -633,14 +771,15 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
                 session.permanent = True
                 session.modified = True
                 logger.info("Ensure-connection reused token → %s", _server_log_label(conn))
-                return jsonify(
-                    {
-                        "success": True,
-                        "connection_token": tok,
-                        "host": conn.get("host"),
-                        "label": conn.get("label") or "",
-                    }
-                )
+                op_conn = resolved_conn or conn
+                payload = {
+                    "success": True,
+                    "connection_token": tok,
+                    "host": conn.get("host"),
+                    "label": conn.get("label") or "",
+                }
+                payload.update(_operation_json(op_conn))
+                return jsonify(payload)
 
         conn, err = resolve_start_load_connection(data, preset_servers)
         if err or not conn:
@@ -657,14 +796,14 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
         session.permanent = True
         session.modified = True
         logger.info("Ensure-connection issued token → %s", _server_log_label(conn))
-        return jsonify(
-            {
-                "success": True,
-                "connection_token": token,
-                "host": conn["host"],
-                "label": conn.get("label") or "",
-            }
-        )
+        payload = {
+            "success": True,
+            "connection_token": token,
+            "host": conn["host"],
+            "label": conn.get("label") or "",
+        }
+        payload.update(_operation_json(conn))
+        return jsonify(payload)
 
     @app.route("/api/start-load", methods=["POST"])
     def api_start_load():
@@ -832,6 +971,10 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
             }
         ), 202
 
+    def _library_action_route_for(method: str):
+        action_key, max_wait = LIBRARY_COMMANDS[method]
+        return _library_action_route(method, action_key, "Library operation started", max_wait)
+
     @app.route("/api/library-operation/<job_id>")
     def library_operation(job_id):
         conn, err = _conn_from_token()
@@ -847,46 +990,62 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
             return jsonify({"success": False, "message": "Operation not found"}), 404
         return jsonify({"success": True, "job": job, "history": history})
 
-    @app.route("/api/library-operation-history")
-    def library_operation_history():
-        conn, err = _conn_from_token()
+    @app.route("/api/server-operation/<preset_id>")
+    def server_operation_by_preset(preset_id: str):
+        conn = _preset_conn(preset_id)
         if not conn:
-            return jsonify({"success": False, "message": err}), 400
+            return jsonify({"success": False, "message": "Unknown preset server"}), 404
+        current, history = _operation_state_for_conn(conn)
+        logger.info(
+            "Server operation lookup preset=%s host=%s current=%s history=%s",
+            preset_id,
+            conn.get("host"),
+            (current or {}).get("state") if current else None,
+            len(history),
+        )
         return jsonify(
             {
                 "success": True,
-                "current": operation_store.get_current(_server_key(conn)),
-                "history": operation_store.get_history(_server_key(conn)),
+                "current": current,
+                "current_operation": current,
+                "history": history,
+                "operation_history": history,
+            }
+        )
+
+    @app.route("/api/library-operation-history")
+    def library_operation_history():
+        conn, err = _conn_for_operation_lookup()
+        if not conn:
+            return jsonify({"success": False, "message": err}), 400
+        current, history = _operation_state_for_conn(conn)
+        return jsonify(
+            {
+                "success": True,
+                "current": current,
+                "history": history,
             }
         )
 
     @app.route("/api/update-video-library", methods=["POST"])
     @app.route("/update-video-library", methods=["POST"])
     def update_video_library():
-        return _library_action_route(
-            "VideoLibrary.Scan", "video_scan", "Kodi returned OK — video library scan accepted", 60.0
-        )
+        return _library_action_route_for("VideoLibrary.Scan")
 
     @app.route("/api/update-audio-library", methods=["POST"])
     @app.route("/update-audio-library", methods=["POST"])
     def update_audio_library():
-        return _library_action_route(
-            "AudioLibrary.Scan", "audio_scan", "Kodi returned OK — audio library scan accepted", 60.0
-        )
+        return _library_action_route_for("AudioLibrary.Scan")
 
     @app.route("/api/clean-video-library", methods=["POST"])
     @app.route("/clean-video-library", methods=["POST"])
     def clean_video_library():
-        return _library_action_route(
-            "VideoLibrary.Clean", "video_clean", "Kodi returned OK — video library clean accepted", 120.0
-        )
+        return _library_action_route_for("VideoLibrary.Clean")
 
     @app.route("/api/clean-music-library", methods=["POST"])
     @app.route("/clean-music-library", methods=["POST"])
     def clean_music_library():
-        return _library_action_route(
-            "AudioLibrary.Clean", "music_clean", "Kodi returned OK — music library clean accepted", 120.0
-        )
+        return _library_action_route_for("AudioLibrary.Clean")
 
     @app.route("/health")
     def health():
@@ -1028,6 +1187,7 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
         )
     else:
         logger.info("No preset Kodi servers configured (custom host entry only)")
+    _resume_in_progress_operations()
     logger.info("Web app ready on port %s (container host hint: %s)", web_port, container_host)
     return app
 

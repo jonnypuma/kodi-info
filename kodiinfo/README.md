@@ -66,6 +66,10 @@ LOG_LEVEL=INFO
 # Server overview reachability probe timeout in seconds (default 3).
 OVERVIEW_PROBE_TIMEOUT_SECONDS=3
 
+# Scan monitoring on slow/large libraries (defaults: 7200 / 86400).
+# LIBRARY_STATUS_GRACE_SECONDS=7200
+# LIBRARY_STATUS_TIMEOUT_SECONDS=86400
+
 WEB_PORT=5005
 ```
 
@@ -103,8 +107,8 @@ python -m unittest discover -s tests -v
 
 - Connection credentials stay on the server behind an opaque `connection_token` (sessionStorage holds only the token).
 - Dashboard stats are cached **in the browser** per server for **3 days** (IndexedDB, with localStorage fallback). Choosing a server again shows the cache immediately; use the refresh icon for a fresh Kodi pull. Passwords are never stored in the cache.
-- Last scan/clean times are what **this app** recorded after a successful Scan/Clean RPC — not historical Kodi DB events from before kodi-info existed.
+- Last scan/clean times are what **this app** recorded after a successful Scan/Clean RPC — not historical Kodi DB events from before kodi-info existed. Timestamps are stored in `output/library_actions.json` on the mounted volume.
 - Scan/Clean can take a long time on Kodi; the UI tracks the operation and probes `Library.IsScanningVideo` or `Library.IsScanningMusic` when available.
 - Scan/Clean operation state and history survive server switching and container restarts through the `output` volume.
-- Kodi HTTP JSON-RPC confirms that a Scan/Clean request was accepted, but does not reliably report scanner completion. If Kodi exposes its scan boolean, the UI changes to `running` and then `completed`; the hard timeout is reset every time Kodi still reports scanning, so long scans can run for hours. If Kodi never exposes a scan state, the accepted state expires after `LIBRARY_STATUS_GRACE_SECONDS` (default 300 seconds).
+- Kodi HTTP JSON-RPC confirms that a Scan/Clean request was accepted, but does not reliably report scanner completion. If Kodi exposes its scan boolean, the UI changes to `running` and then `completed`; the idle timeout is reset every time Kodi still reports scanning, so multi-hour scans are supported. Default timeouts are `LIBRARY_STATUS_GRACE_SECONDS=7200` (2 hours) and `LIBRARY_STATUS_TIMEOUT_SECONDS=86400` (24 hours). If Kodi never exposes scan status, the UI stays on `running` for the full scan instead of clearing after a few minutes.
 - The container uses Waitress in production. `BASIC_AUTH` protects operational routes while `/health` and `/ready` remain available for Docker health checks.

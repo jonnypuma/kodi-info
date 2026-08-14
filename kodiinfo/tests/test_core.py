@@ -17,6 +17,7 @@ from kodi_client import (
     KodiLibraryProbe,
     _normalize_manual_url,
     _slot_kodi_credentials,
+    canonical_server_key,
     clamp_recent_limit,
     connection_dict_for_preset,
     recent_limit_from_env,
@@ -27,6 +28,12 @@ from operation_store import OperationStore
 
 
 class TestUrlParse(unittest.TestCase):
+    def test_canonical_server_key_normalizes_host_formats(self):
+        self.assertEqual(
+            canonical_server_key("192.168.0.30:6666"),
+            canonical_server_key("http://192.168.0.30:6666"),
+        )
+
     def test_normalize_manual_url(self):
         url, err = _normalize_manual_url("192.168.1.10", 6668, "http")
         self.assertIsNone(err)
@@ -152,6 +159,21 @@ class TestLibraryActions(unittest.TestCase):
             self.assertIsNotNone(a["last_video_clean"])
             self.assertIsNone(a["last_audio_scan"])
 
+    def test_legacy_host_keys_are_migrated(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "library_actions.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(
+                    '{"192.168.0.30:6666": {"last_video_scan": "2026-07-31T10:00:00", '
+                    '"last_audio_scan": "2026-08-01T11:00:00"}}'
+                )
+            store = library_actions.LibraryActionStore()
+            store._base_dir = td
+            store._file_path = path
+            actions = store.get_actions("http://192.168.0.30:6666")
+            self.assertEqual(actions["last_video_scan"], "2026-07-31T10:00:00")
+            self.assertEqual(actions["last_audio_scan"], "2026-08-01T11:00:00")
+
 
 class TestOperationStore(unittest.TestCase):
     def test_state_and_history_persist(self):
@@ -164,6 +186,31 @@ class TestOperationStore(unittest.TestCase):
             current = reopened.get_current("http://kodi:8080")
             self.assertEqual(current["state"], "accepted")
             self.assertEqual(reopened.get_history("http://kodi:8080")[0]["job_id"], job["job_id"])
+
+    def test_find_for_host_reads_without_expiry_side_effects(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "operations.json")
+            store = OperationStore(path=path)
+            job = store.start("http://192.168.0.19:6666", {"host": "http://192.168.0.19:6666"}, "VideoLibrary.Scan")
+            store.update("http://192.168.0.19:6666", job["job_id"], state="running", message="scanning")
+            current, history = store.find_for_host("http://192.168.0.19:6666")
+            self.assertEqual(current["state"], "running")
+            self.assertEqual(history[0]["job_id"], job["job_id"])
+
+    def test_find_for_host_merges_legacy_keys(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "operations.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(
+                    '{"version": 1, "servers": {"192.168.0.19:6666": {"current": null, '
+                    '"history": [{"job_id": "abc", "operation": "VideoLibrary.Scan", '
+                    '"state": "running", "started_at": "2026-08-14T18:00:00+00:00", '
+                    '"updated_at": "2026-08-14T18:00:00+00:00", "elapsed_seconds": 10}]}}}'
+                )
+            store = OperationStore(path=path)
+            current, history = store.find_for_host("http://192.168.0.19:6666")
+            self.assertEqual(current["state"], "running")
+            self.assertEqual(history[0]["job_id"], "abc")
 
 
 class TestWebAuth(unittest.TestCase):

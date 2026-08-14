@@ -7,6 +7,7 @@
   const CACHE_STORE = "dashboards";
   const CACHE_TTL_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
   const POLL_MS = 2000;
+  const OVERVIEW_REFRESH_MS = 30000;
   const STATUS_HIDE_MS = 20000;
   const BTN_OK_MS = 4000;
   const BTN_ERR_MS = 12000;
@@ -22,7 +23,12 @@
   let loadInProgress = false;
   let activeJobId = null;
   let operationTimer = null;
+  let operationTickTimer = null;
+  let lastOperationHistorySignature = "";
+  let activeOperationJob = null;
   let operationReloaded = {};
+  let overviewRefreshTimer = null;
+  let overviewHasActiveOps = false;
 
   const $ = (id) => document.getElementById(id);
 
@@ -33,6 +39,12 @@
       loading: $("view-loading"),
       dashboard: $("view-dashboard"),
     };
+    if (name !== "overview") {
+      stopOverviewRefresh();
+    }
+    if (name !== "dashboard") {
+      stopOperationPolling();
+    }
     Object.keys(views).forEach((key) => {
       const el = views[key];
       if (!el) return;
@@ -40,6 +52,132 @@
       el.hidden = !on;
       el.style.display = on ? "" : "none";
     });
+  }
+
+  function stopOverviewRefresh() {
+    if (overviewRefreshTimer) {
+      clearInterval(overviewRefreshTimer);
+      overviewRefreshTimer = null;
+    }
+  }
+
+  function startOverviewRefresh() {
+    stopOverviewRefresh();
+    const interval = overviewHasActiveOps ? 5000 : OVERVIEW_REFRESH_MS;
+    overviewRefreshTimer = setInterval(() => {
+      refreshOverviewReachability();
+    }, interval);
+  }
+
+  function applyOperationState(current, history) {
+    if (current !== undefined) {
+      if (current) renderOperation(current);
+      else if (!activeOperationJob || !operationIsActive(activeOperationJob)) renderOperation(null);
+    }
+    if (history !== undefined) renderOperationHistory(history);
+  }
+
+  function isConnectionError(message) {
+    const text = String(message || "").toLowerCase();
+    return (
+      text.includes("no route to host") ||
+      text.includes("connection refused") ||
+      text.includes("failed to establish") ||
+      text.includes("max retries exceeded") ||
+      text.includes("unable to reach") ||
+      text.includes("name or service not known") ||
+      text.includes("timed out")
+    );
+  }
+
+  function shortenConnectionError(message) {
+    const text = String(message || "");
+    if (text.includes("No route to host")) return "Host unreachable (no route to host)";
+    if (text.includes("Connection refused")) return "Connection refused";
+    const hostMatch = text.match(/host='([^']+)'/);
+    if (hostMatch && text.includes("Max retries exceeded")) {
+      return "Cannot reach " + hostMatch[1];
+    }
+    if (text.length > 140) return text.slice(0, 137) + "...";
+    return text;
+  }
+
+  function formatOperationStatus(job) {
+    if (!job) return "";
+    let line = job.operation + " · " + job.state;
+    const started = Date.parse(job.started_at || "") || Date.now();
+    const end = job.finished_at ? (Date.parse(job.finished_at) || Date.now()) : Date.now();
+    const elapsed = formatDuration((end - started) / 1000);
+    line += " · " + elapsed;
+    if (!job.message) return line;
+    const detail = isConnectionError(job.message)
+      ? shortenConnectionError(job.message)
+      : job.message;
+    return line + " — " + detail;
+  }
+
+  function updateOverviewOperationCard(card, current) {
+    if (!card) return;
+    const operationLine = card.querySelector(".server-current-operation");
+    const operationCard = card.querySelector(".server-operation-card");
+    const operationStatus = card.querySelector(".server-operation-status");
+    if (!current || ["completed", "failed", "timed_out"].includes(current.state)) {
+      if (operationLine && operationCard && operationCard.dataset.dismissed === "true") {
+        return;
+      }
+      if (operationLine) operationLine.textContent = "";
+      if (operationCard && operationCard.dataset.dismissed !== "true") {
+        operationCard.hidden = true;
+      }
+      return;
+    }
+    const failed = ["failed", "timed_out"].includes(current.state);
+    if (operationLine) {
+      operationLine.textContent = current.operation + " · " + current.state;
+    }
+    if (operationStatus) {
+      operationStatus.textContent = formatOperationStatus(current);
+      operationStatus.title = current.message || "";
+    }
+    if (operationCard && operationCard.dataset.dismissed !== "true") {
+      operationCard.hidden = false;
+      operationCard.classList.toggle("is-failed", failed);
+    }
+  }
+
+  function setCardReachability(card, reachable, kodiVersion) {
+    if (!card) return;
+    card.classList.toggle("online", !!reachable);
+    card.classList.toggle("offline", !reachable);
+    const stateEl = card.querySelector(".server-state");
+    if (!stateEl) return;
+    const state = reachable ? "Online" : "Offline";
+    stateEl.textContent = state + (kodiVersion ? " · " + kodiVersion : "");
+  }
+
+  async function refreshOverviewReachability() {
+    const grid = $("server-overview-grid");
+    if (!grid || !grid.children.length) return;
+    try {
+      const res = await fetch("/api/server-overview", { credentials: "same-origin" });
+      const data = await res.json();
+      if (!res.ok || !data.success) return;
+      let sawActive = false;
+      (data.servers || []).forEach((server) => {
+        const card = grid.querySelector('[data-server-id="' + String(server.id) + '"]');
+        if (card) {
+          setCardReachability(card, server.reachable, server.kodi_version);
+          updateOverviewOperationCard(card, server.current_operation);
+          if (server.current_operation && operationIsActive(server.current_operation)) {
+            sawActive = true;
+          }
+        }
+      });
+      if (sawActive !== overviewHasActiveOps) {
+        overviewHasActiveOps = sawActive;
+        startOverviewRefresh();
+      }
+    } catch (e) {}
   }
 
   function getToken() {
@@ -213,6 +351,21 @@
       " · Last music clean: " + formatActionTime(a.last_music_clean);
   }
 
+  async function refreshLibraryActionsMeta() {
+    const tok = (currentCacheKey && tokenForKey(currentCacheKey)) || getToken();
+    if (!tok) return;
+    try {
+      const res = await fetch("/api/library-actions", {
+        credentials: "same-origin",
+        headers: { "X-Connection-Token": tok },
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        updateLibraryMeta(data.actions);
+      }
+    } catch (e) {}
+  }
+
   function setProgressBars(stats) {
     const mp = Math.max(0, Math.min(100, Number(stats.movie_watch_pct || 0)));
     const ep = Math.max(0, Math.min(100, Number(stats.episode_watch_pct || 0)));
@@ -322,13 +475,15 @@
     renderRecentList("recent-movies", recent.movies, "movie-poster");
     renderRecentList("recent-episodes", recent.episodes, "episode-thumb");
     renderRecentList("recent-albums", recent.albums, "album-cover");
+    applyOperationState(data.current_operation, data.operation_history);
     showView("dashboard");
     if (opts.actionsReady === false) {
       setLibraryActionsEnabled(false);
     } else {
       setLibraryActionsEnabled(true);
-      startOperationPolling();
+      refreshLibraryActionsMeta();
     }
+    startOperationPolling();
   }
 
   function bindZoom() {
@@ -394,20 +549,97 @@
       String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
   }
 
-  function renderOperation(job) {
+  function operationIsActive(job) {
+    return !!job && ["requested", "running", "accepted"].includes(job.state);
+  }
+
+  function operationElapsedSeconds(job) {
+    if (!job) return 0;
+    const started = Date.parse(job.started_at || "") || Date.now();
+    const end = job.finished_at ? (Date.parse(job.finished_at) || Date.now()) : Date.now();
+    return Math.max(0, Math.floor((end - started) / 1000));
+  }
+
+  function stopOperationTick() {
+    if (operationTickTimer) {
+      clearInterval(operationTickTimer);
+      operationTickTimer = null;
+    }
+  }
+
+  function startOperationTick() {
+    if (operationTickTimer) return;
+    operationTickTimer = setInterval(() => {
+      if (!activeOperationJob || !operationIsActive(activeOperationJob)) {
+        stopOperationTick();
+        return;
+      }
+      renderOperation(activeOperationJob, { tickOnly: true });
+      updateRunningHistoryRow();
+    }, 1000);
+  }
+
+  function operationHistorySignature(history) {
+    return (history || [])
+      .map(function (job) {
+        return [
+          job.job_id || "",
+          job.state || "",
+          job.finished_at || "",
+          job.message || "",
+        ].join(":");
+      })
+      .join("|");
+  }
+
+  function historyRowElapsed(job) {
+    if (operationIsActive(job)) return operationElapsedSeconds(job);
+    if (job.elapsed_seconds != null && job.elapsed_seconds !== "") {
+      return Number(job.elapsed_seconds) || 0;
+    }
+    return operationElapsedSeconds(job);
+  }
+
+  function historyRowText(job) {
+    return job.operation + " · " + job.state + " · " +
+      formatActionTime(job.started_at) + " · " + formatDuration(historyRowElapsed(job));
+  }
+
+  function updateRunningHistoryRow() {
+    const list = $("operation-history-list");
+    if (!list || !activeOperationJob) return;
+    const job = activeOperationJob;
+    const jobId = String(job.job_id || "");
+    let row = jobId
+      ? list.querySelector('.history-row[data-job-id="' + jobId + '"]')
+      : null;
+    if (!row) row = list.firstElementChild;
+    if (!row) return;
+    row.textContent = historyRowText(job);
+  }
+
+  function renderOperation(job, opts) {
+    opts = opts || {};
     const el = $("operation-status");
     if (!el) return;
     if (!job) {
       el.hidden = true;
+      activeOperationJob = null;
+      stopOperationTick();
       return;
     }
-    const started = Date.parse(job.started_at || "") || Date.now();
-    const end = job.finished_at ? (Date.parse(job.finished_at) || Date.now()) : Date.now();
-    const elapsed = Math.max(0, Math.floor((end - started) / 1000));
+    const elapsed = operationElapsedSeconds(job);
     const state = String(job.state || "requested").replace("_", " ");
     el.hidden = false;
     el.textContent = job.operation + " · " + state + " · " + formatDuration(elapsed) +
       (job.message ? " — " + job.message : "");
+    if (operationIsActive(job)) {
+      activeOperationJob = job;
+      if (!opts.tickOnly) startOperationTick();
+    } else {
+      activeOperationJob = null;
+      stopOperationTick();
+    }
   }
 
   function renderOperationHistory(history) {
@@ -416,14 +648,20 @@
     if (!details || !list) return;
     const items = Array.isArray(history) ? history : [];
     details.hidden = items.length === 0;
-    list.textContent = "";
-    items.slice(0, 10).forEach((job) => {
-      const row = document.createElement("div");
-      row.className = "history-row";
-      row.textContent = job.operation + " · " + job.state + " · " +
-        formatActionTime(job.started_at) + " · " + formatDuration(job.elapsed_seconds);
-      list.appendChild(row);
+    items.slice(0, 10).forEach((job, idx) => {
+      let row = list.children[idx];
+      if (!row) {
+        row = document.createElement("div");
+        row.className = "history-row";
+        list.appendChild(row);
+      }
+      row.dataset.jobId = job.job_id || "";
+      row.textContent = historyRowText(job);
     });
+    while (list.children.length > items.length) {
+      list.removeChild(list.lastElementChild);
+    }
+    lastOperationHistorySignature = operationHistorySignature(items);
   }
 
   function stopOperationPolling() {
@@ -431,23 +669,102 @@
       clearInterval(operationTimer);
       operationTimer = null;
     }
+    activeOperationJob = null;
+    stopOperationTick();
+  }
+
+  function resolvePresetId() {
+    if (lastLoadBody && lastLoadBody.preset != null && String(lastLoadBody.preset).trim() !== "") {
+      return String(lastLoadBody.preset).trim();
+    }
+    if (currentCacheKey && currentCacheKey.startsWith("preset:")) {
+      return currentCacheKey.slice("preset:".length);
+    }
+    return "";
+  }
+
+  function resolveCustomHost() {
+    if (lastLoadBody && lastLoadBody.custom && lastLoadBody.host) {
+      const scheme = String(lastLoadBody.scheme || "http").toLowerCase() === "https" ? "https" : "http";
+      let port = parseInt(lastLoadBody.port, 10);
+      if (!Number.isFinite(port)) port = 8080;
+      return scheme + "://" + String(lastLoadBody.host).trim().toLowerCase() + ":" + port;
+    }
+    if (currentCacheKey && currentCacheKey.startsWith("custom:")) {
+      return currentCacheKey.slice("custom:".length);
+    }
+    return "";
+  }
+
+  function canFetchOperationHistory() {
+    const tok = (currentCacheKey && tokenForKey(currentCacheKey)) || getToken();
+    return !!(tok || resolvePresetId() || resolveCustomHost());
+  }
+
+  function operationHistoryUrl() {
+    const preset = resolvePresetId();
+    if (preset) {
+      return "/api/server-operation/" + encodeURIComponent(preset);
+    }
+    const params = new URLSearchParams();
+    const host = resolveCustomHost();
+    if (host) params.set("host", host);
+    const query = params.toString();
+    return "/api/library-operation-history" + (query ? "?" + query : "");
+  }
+
+  function operationHistoryHeaders() {
+    const headers = {};
+    const preset = resolvePresetId();
+    if (preset) return headers;
+    const tok = (currentCacheKey && tokenForKey(currentCacheKey)) || getToken();
+    if (tok) headers["X-Connection-Token"] = tok;
+    return headers;
   }
 
   async function refreshOperationState() {
-    if (!actionsReady) return;
+    const onDashboard = $("view-dashboard") && !$("view-dashboard").hidden;
+    if (!onDashboard || !canFetchOperationHistory()) return;
     try {
-      const res = await fetch("/api/library-operation-history", { credentials: "same-origin" });
-      if (!res.ok) return;
+      const res = await fetch(operationHistoryUrl(), {
+        credentials: "same-origin",
+        headers: operationHistoryHeaders(),
+      });
+      if (!res.ok) {
+        if (activeOperationJob && operationIsActive(activeOperationJob)) {
+          renderOperation(activeOperationJob, { tickOnly: true });
+        }
+        return;
+      }
       const data = await res.json();
-      const job = data.current;
-      renderOperation(job);
-      renderOperationHistory(data.history);
+      if (!data.success) return;
+      const job = data.current != null ? data.current : data.current_operation;
+      const history = Array.isArray(data.history)
+        ? data.history
+        : (Array.isArray(data.operation_history) ? data.operation_history : []);
+      if (job) {
+        renderOperation(job);
+      } else if (!activeOperationJob || !operationIsActive(activeOperationJob)) {
+        renderOperation(null);
+      }
+      if (Array.isArray(history)) {
+        const sig = operationHistorySignature(history);
+        if (sig !== lastOperationHistorySignature) {
+          renderOperationHistory(history);
+        } else if (activeOperationJob && operationIsActive(activeOperationJob)) {
+          updateRunningHistoryRow();
+        }
+      }
       if (!job) return;
       if (job.state === "accepted" && !operationReloaded[job.job_id]) {
         operationReloaded[job.job_id] = true;
         // HTTP JSON-RPC confirms acceptance, not scanner completion. Reload
         // shortly so newly indexed items appear without claiming completion.
         setTimeout(() => refreshDashboard(), 1500);
+      }
+      if (["completed", "failed", "timed_out"].includes(job.state)) {
+        refreshLibraryActionsMeta();
+        stopOperationTick();
       }
     } catch (e) {}
   }
@@ -539,7 +856,13 @@
         setToken(data.connection_token);
         if (cacheKey) rememberTokenForKey(cacheKey, data.connection_token);
       }
-      return { ok: true, token: data.connection_token, host: data.host || "" };
+      return {
+        ok: true,
+        token: data.connection_token,
+        host: data.host || "",
+        current_operation: data.current_operation,
+        operation_history: data.operation_history,
+      };
     } catch (e) {
       return { ok: false, message: (e && e.message) || String(e) };
     }
@@ -557,25 +880,32 @@
     if (!forceRefresh && cacheKey) {
       const entry = await cacheGet(cacheKey);
       if (cacheIsFresh(entry)) {
-        // Do not keep the previous server's token; wait until this server is ensured.
         setToken(tokenForKey(cacheKey) || "");
         setLibraryActionsEnabled(false);
-        renderDashboard(entry.data, {
+        const ensured = await ensureConnection(body, cacheKey);
+        const dashData = Object.assign({}, entry.data || {});
+        if (ensured.ok) {
+          if (ensured.current_operation !== undefined) {
+            dashData.current_operation = ensured.current_operation;
+          }
+          if (ensured.operation_history !== undefined) {
+            dashData.operation_history = ensured.operation_history;
+          }
+        }
+        renderDashboard(dashData, {
           cacheKey,
           fromCache: true,
           cachedAt: entry.cachedAt,
-          actionsReady: false,
+          actionsReady: !!ensured.ok,
         });
-        const ensured = await ensureConnection(body, cacheKey);
-        if (ensured.ok) {
-          setLibraryActionsEnabled(true);
-        } else {
-          setLibraryActionsEnabled(false);
+        if (!ensured.ok) {
           showStatus(
             "err",
             "Cached library shown — actions disabled",
             "Could not bind connection for this server: " + (ensured.message || "unknown error")
           );
+        } else {
+          refreshLibraryActionsMeta();
         }
         return;
       }
@@ -848,6 +1178,7 @@
     if (statusCard) {
       statusCard.hidden = false;
       statusCard.dataset.dismissed = "false";
+      statusCard.classList.remove("is-failed");
     }
     if (status) status.textContent = label + " starting…";
     const body = { preset: String(server.id) };
@@ -871,12 +1202,15 @@
       if (operation) operation.textContent = data.operation + " · requested";
       const poll = async () => {
         try {
-          const current = await fetch("/api/library-operation-history", {
+          const current = await fetch(operationHistoryUrl(), {
             credentials: "same-origin",
-            headers: { "X-Connection-Token": token },
+            headers: {
+              ...operationHistoryHeaders(),
+              "Content-Type": "application/json",
+            },
           });
           const state = await current.json();
-          const job = state.current;
+          const job = state.current != null ? state.current : state.current_operation;
           if (job && operation) {
             operation.textContent = job.operation + " · " + job.state;
           }
@@ -884,12 +1218,21 @@
             statusCard.hidden = false;
           }
           if (job && ["completed", "failed", "timed_out"].includes(job.state)) {
+            const failed = job.state === "failed" || job.state === "timed_out";
+            if (statusCard) statusCard.classList.toggle("is-failed", failed);
             if (status) {
-              status.textContent = job.operation + " · " + job.state +
-                (job.message ? " — " + job.message : "");
+              status.textContent = formatOperationStatus(job);
+              status.title = job.message || "";
             }
             if (operation) operation.textContent = "";
+            if (failed && isConnectionError(job.message)) {
+              setCardReachability(card, false, null);
+            }
             return;
+          }
+          if (job && status && statusCard && statusCard.dataset.dismissed !== "true") {
+            status.textContent = formatOperationStatus(job);
+            status.title = job.message || "";
           }
           setTimeout(poll, POLL_MS);
         } catch (error) {
@@ -898,7 +1241,19 @@
       };
       setTimeout(poll, POLL_MS);
     } catch (error) {
-      if (status) status.textContent = label + " failed: " + ((error && error.message) || error);
+      const message = (error && error.message) || String(error);
+      if (statusCard) {
+        statusCard.hidden = false;
+        statusCard.classList.add("is-failed");
+      }
+      if (status) {
+        status.textContent = label + " failed — " + shortenConnectionError(message);
+        status.title = message;
+      }
+      if (operation) operation.textContent = "";
+      if (isConnectionError(message)) {
+        setCardReachability(card, false, null);
+      }
     }
   }
 
@@ -917,9 +1272,11 @@
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.message || "Unable to load overview");
       grid.textContent = "";
+      overviewHasActiveOps = false;
       (data.servers || []).forEach((server) => {
         const card = document.createElement("article");
         card.className = "server-overview-card " + (server.reachable ? "online" : "offline");
+        card.dataset.serverId = String(server.id);
         const state = server.reachable ? "Online" : "Offline";
         const current = server.current_operation;
         card.innerHTML =
@@ -937,14 +1294,13 @@
         const operationCard = card.querySelector(".server-operation-card");
         const operationStatus = card.querySelector(".server-operation-status");
         if (current) {
-          operationLine.textContent = current.operation + " · " + current.state;
-          operationStatus.textContent = current.operation + " · " + current.state +
-            (current.message ? " — " + current.message : "");
-          operationCard.hidden = false;
+          updateOverviewOperationCard(card, current);
+          if (operationIsActive(current)) overviewHasActiveOps = true;
         }
         card.querySelector(".server-operation-close").addEventListener("click", () => {
           operationCard.dataset.dismissed = "true";
           operationCard.hidden = true;
+          if (operationLine) operationLine.textContent = "";
         });
         const actions = card.querySelector(".server-actions");
         const open = document.createElement("button");
@@ -969,6 +1325,7 @@
         actions.appendChild(refresh);
         grid.appendChild(card);
       });
+      startOverviewRefresh();
     } catch (e) {
       grid.textContent = (e && e.message) || "Unable to load server overview";
     }
@@ -1104,6 +1461,12 @@
       if (ev.key === "Escape" && overlay.classList.contains("visible")) {
         overlay.classList.remove("visible", "episode-zoom");
         $("overlay-image").src = "";
+      }
+    });
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && !$("view-overview").hidden) {
+        refreshOverviewReachability();
       }
     });
 
