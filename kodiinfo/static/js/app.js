@@ -71,8 +71,11 @@
 
   function applyOperationState(current, history) {
     if (current !== undefined) {
-      if (current) renderOperation(current);
-      else if (!activeOperationJob || !operationIsActive(activeOperationJob)) renderOperation(null);
+      if (current && operationIsActive(current)) {
+        renderOperation(current);
+      } else {
+        renderOperation(null);
+      }
     }
     if (history !== undefined) renderOperationHistory(history);
   }
@@ -742,27 +745,33 @@
       const history = Array.isArray(data.history)
         ? data.history
         : (Array.isArray(data.operation_history) ? data.operation_history : []);
-      if (job) {
-        renderOperation(job);
-      } else if (!activeOperationJob || !operationIsActive(activeOperationJob)) {
+      const prevSig = lastOperationHistorySignature;
+      const activeFromServer = job && operationIsActive(job) ? job : null;
+      if (activeFromServer) {
+        renderOperation(activeFromServer);
+      } else {
         renderOperation(null);
       }
       if (Array.isArray(history)) {
         const sig = operationHistorySignature(history);
-        if (sig !== lastOperationHistorySignature) {
+        if (sig !== prevSig) {
           renderOperationHistory(history);
-        } else if (activeOperationJob && operationIsActive(activeOperationJob)) {
+          if (!activeFromServer && prevSig) {
+            refreshLibraryActionsMeta();
+            stopOperationTick();
+          }
+        } else if (activeFromServer) {
           updateRunningHistoryRow();
         }
       }
-      if (!job) return;
-      if (job.state === "accepted" && !operationReloaded[job.job_id]) {
-        operationReloaded[job.job_id] = true;
+      if (!activeFromServer) return;
+      if (activeFromServer.state === "accepted" && !operationReloaded[activeFromServer.job_id]) {
+        operationReloaded[activeFromServer.job_id] = true;
         // HTTP JSON-RPC confirms acceptance, not scanner completion. Reload
         // shortly so newly indexed items appear without claiming completion.
         setTimeout(() => refreshDashboard(), 1500);
       }
-      if (["completed", "failed", "timed_out"].includes(job.state)) {
+      if (["completed", "failed", "timed_out"].includes(activeFromServer.state)) {
         refreshLibraryActionsMeta();
         stopOperationTick();
       }
@@ -1465,8 +1474,12 @@
     });
 
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible" && !$("view-overview").hidden) {
+      if (document.visibilityState !== "visible") return;
+      if (!$("view-overview").hidden) {
         refreshOverviewReachability();
+      }
+      if ($("view-dashboard") && !$("view-dashboard").hidden && canFetchOperationHistory()) {
+        refreshOperationState();
       }
     });
 
