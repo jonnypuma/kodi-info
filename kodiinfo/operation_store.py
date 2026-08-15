@@ -17,6 +17,14 @@ from kodi_client import canonical_server_key
 logger = logging.getLogger(__name__)
 
 _ACTIVE_STATES = {"requested", "running", "accepted"}
+_TERMINAL_STATES = {"completed", "failed", "timed_out"}
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
 
 
 def _enrich_elapsed(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -50,6 +58,97 @@ class OperationStore:
         with self._lock:
             self._load()
             self._migrate_server_keys()
+            self._reconcile_all_servers()
+
+    def _mark_terminal(self, job: Dict[str, Any], state: str, message: str) -> None:
+        job["state"] = state
+        job["message"] = message
+        job["updated_at"] = utc_now()
+        if not job.get("finished_at"):
+            job["finished_at"] = utc_now()
+        try:
+            started = datetime.fromisoformat(job["started_at"]).timestamp()
+            ended = datetime.fromisoformat(job["finished_at"]).timestamp()
+            job["elapsed_seconds"] = max(0, int(ended - started))
+        except (KeyError, TypeError, ValueError):
+            pass
+
+    def _collect_active_jobs(self, server: Dict[str, Any]) -> List[Dict[str, Any]]:
+        jobs: List[Dict[str, Any]] = []
+        seen = set()
+        current = server.get("current")
+        if current and current.get("state") in _ACTIVE_STATES:
+            job_id = current.get("job_id")
+            if job_id and job_id not in seen:
+                jobs.append(current)
+                seen.add(job_id)
+        for item in server.get("history", []):
+            job_id = item.get("job_id")
+            if not job_id or job_id in seen:
+                continue
+            if item.get("state") in _ACTIVE_STATES:
+                jobs.append(item)
+                seen.add(job_id)
+        return jobs
+
+    def _stale_active_reason(self, job: Dict[str, Any]) -> tuple[bool, str]:
+        state = job.get("state")
+        if state not in _ACTIVE_STATES:
+            return False, ""
+        try:
+            started = datetime.fromisoformat(job["started_at"]).timestamp()
+            updated = datetime.fromisoformat(job["updated_at"]).timestamp()
+            now = time.time()
+            status_timeout = max(3600.0, _env_float("LIBRARY_STATUS_TIMEOUT_SECONDS", 86400))
+            max_scan = max(7200.0, _env_float("LIBRARY_MAX_SCAN_SECONDS", 43200))
+            grace = max(60.0, _env_float("LIBRARY_STATUS_GRACE_SECONDS", 7200))
+            if state == "running":
+                if now - updated > status_timeout:
+                    return True, "Scan status lost contact with Kodi"
+                if now - started > max_scan:
+                    return True, "Scan exceeded maximum expected duration"
+            elif state == "accepted":
+                if now - updated > grace:
+                    return True, "Operation status expired; Kodi completion could not be confirmed"
+            elif state == "requested":
+                request_timeout = max(120.0, _env_float("LIBRARY_STATUS_TIMEOUT_SECONDS", 1800))
+                if now - updated > request_timeout:
+                    return True, "Operation never started after restart"
+        except (KeyError, TypeError, ValueError):
+            return False, ""
+        return False, ""
+
+    def _reconcile_server(self, server_key: str) -> bool:
+        server = self._server(server_key)
+        changed = False
+        for job in list(self._collect_active_jobs(server)):
+            stale, message = self._stale_active_reason(job)
+            if stale:
+                terminal_state = "failed" if job.get("state") == "requested" else "completed"
+                self._mark_terminal(job, terminal_state, message)
+                changed = True
+
+        actives = self._collect_active_jobs(server)
+        if len(actives) > 1:
+            actives.sort(key=lambda row: row.get("started_at") or "", reverse=True)
+            for job in actives[1:]:
+                self._mark_terminal(job, "completed", "Superseded by a newer library operation")
+                changed = True
+            server["current"] = actives[0]
+            changed = True
+        elif len(actives) == 1:
+            if server.get("current") is not actives[0]:
+                server["current"] = actives[0]
+                changed = True
+        return changed
+
+    def _reconcile_all_servers(self) -> None:
+        changed = False
+        for server_key in list(self._data.get("servers", {}).keys()):
+            if self._reconcile_server(server_key):
+                changed = True
+        if changed:
+            self._save()
 
     def _migrate_server_keys(self) -> None:
         servers = self._data.get("servers", {})
@@ -127,6 +226,12 @@ class OperationStore:
         }
         with self._lock:
             server = self._server(server_key)
+            for prior in self._collect_active_jobs(server):
+                self._mark_terminal(
+                    prior,
+                    "completed",
+                    "Superseded by a newer library operation",
+                )
             server["current"] = job
             server["history"] = [job] + server.get("history", [])[: self.history_limit - 1]
             self._save()
@@ -158,6 +263,8 @@ class OperationStore:
 
     def get_current(self, server_key: str) -> Optional[Dict[str, Any]]:
         with self._lock:
+            if self._reconcile_server(server_key):
+                self._save()
             current = self._server(server_key).get("current")
             if current and current.get("state") in {"requested", "running", "accepted"}:
                 try:
@@ -168,7 +275,10 @@ class OperationStore:
                 try:
                     state = current.get("state")
                     if state == "running":
-                        pass
+                        stale, message = self._stale_active_reason(current)
+                        if stale:
+                            self._mark_terminal(current, "completed", message)
+                            self._save()
                     elif state == "accepted":
                         env_name = "LIBRARY_STATUS_GRACE_SECONDS"
                         default_timeout = "7200"
@@ -219,10 +329,14 @@ class OperationStore:
         current: Optional[Dict[str, Any]] = None
         history: List[Dict[str, Any]] = []
         seen_jobs = set()
+        changed = False
         with self._lock:
             for stored_key, bucket in self._data.get("servers", {}).items():
                 if canonical_server_key(stored_key) != target:
                     continue
+                if self._reconcile_server(stored_key):
+                    changed = True
+                bucket = self._server(stored_key)
                 raw_current = bucket.get("current")
                 if raw_current:
                     item = _enrich_elapsed(dict(raw_current))
@@ -240,6 +354,8 @@ class OperationStore:
                 if item.get("state") in _ACTIVE_STATES:
                     current = item
                     break
+        if changed:
+            self._save()
         return current, history[:history_limit]
 
     def all_servers(self) -> Dict[str, Dict[str, Any]]:

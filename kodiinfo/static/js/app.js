@@ -596,7 +596,11 @@
   }
 
   function historyRowElapsed(job) {
-    if (operationIsActive(job)) return operationElapsedSeconds(job);
+    const isLive =
+      activeOperationJob &&
+      job.job_id === activeOperationJob.job_id &&
+      operationIsActive(job);
+    if (isLive) return operationElapsedSeconds(job);
     if (job.elapsed_seconds != null && job.elapsed_seconds !== "") {
       return Number(job.elapsed_seconds) || 0;
     }

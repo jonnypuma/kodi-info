@@ -1,5 +1,6 @@
 """Unit tests for credential fallback, URL parsing, tokens, and connection resolve."""
 
+import json
 import os
 import sys
 import tempfile
@@ -199,18 +200,65 @@ class TestOperationStore(unittest.TestCase):
 
     def test_find_for_host_merges_legacy_keys(self):
         with tempfile.TemporaryDirectory() as td:
+            from datetime import datetime, timedelta, timezone
+
+            now = datetime.now(timezone.utc)
+            started = (now - timedelta(minutes=5)).isoformat()
+            updated = (now - timedelta(minutes=1)).isoformat()
             path = os.path.join(td, "operations.json")
+            payload = {
+                "version": 1,
+                "servers": {
+                    "192.168.0.19:6666": {
+                        "current": None,
+                        "history": [
+                            {
+                                "job_id": "abc",
+                                "operation": "VideoLibrary.Scan",
+                                "state": "running",
+                                "started_at": started,
+                                "updated_at": updated,
+                                "elapsed_seconds": 10,
+                            }
+                        ],
+                    }
+                },
+            }
             with open(path, "w", encoding="utf-8") as f:
-                f.write(
-                    '{"version": 1, "servers": {"192.168.0.19:6666": {"current": null, '
-                    '"history": [{"job_id": "abc", "operation": "VideoLibrary.Scan", '
-                    '"state": "running", "started_at": "2026-08-14T18:00:00+00:00", '
-                    '"updated_at": "2026-08-14T18:00:00+00:00", "elapsed_seconds": 10}]}}}'
-                )
+                json.dump(payload, f)
             store = OperationStore(path=path)
             current, history = store.find_for_host("http://192.168.0.19:6666")
             self.assertEqual(current["state"], "running")
             self.assertEqual(history[0]["job_id"], "abc")
+
+    def test_start_supersedes_previous_running(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "operations.json")
+            store = OperationStore(path=path)
+            first = store.start("http://192.168.0.19:6666", {"host": "http://192.168.0.19:6666"}, "VideoLibrary.Scan")
+            store.update("http://192.168.0.19:6666", first["job_id"], state="running", message="scanning")
+            second = store.start("http://192.168.0.19:6666", {"host": "http://192.168.0.19:6666"}, "VideoLibrary.Scan")
+            current, history = store.find_for_host("http://192.168.0.19:6666")
+            self.assertEqual(current["job_id"], second["job_id"])
+            prior = next(item for item in history if item["job_id"] == first["job_id"])
+            self.assertEqual(prior["state"], "completed")
+            self.assertIn("Superseded", prior["message"])
+
+    def test_reconcile_expires_stale_running(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "operations.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(
+                    '{"version": 1, "servers": {"http://192.168.0.19:6666": {"current": {'
+                    '"job_id": "old", "operation": "VideoLibrary.Scan", "state": "running", '
+                    '"started_at": "2020-01-01T00:00:00+00:00", '
+                    '"updated_at": "2020-01-01T01:00:00+00:00", "finished_at": null, '
+                    '"elapsed_seconds": 3600}, "history": []}}}'
+                )
+            store = OperationStore(path=path)
+            current, _ = store.find_for_host("http://192.168.0.19:6666")
+            self.assertEqual(current["state"], "completed")
+            self.assertIsNotNone(current.get("finished_at"))
 
 
 class TestWebAuth(unittest.TestCase):
