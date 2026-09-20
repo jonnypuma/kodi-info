@@ -277,6 +277,23 @@ class TestWebAuth(unittest.TestCase):
             self.assertEqual(client.get("/api/config").status_code, 200)
 
 
+class TestLibraryTimeouts(unittest.TestCase):
+    def test_clean_uses_long_http_timeout(self):
+        from webapp import is_clean_operation, library_http_timeout
+
+        self.assertTrue(is_clean_operation("VideoLibrary.Clean"))
+        self.assertTrue(is_clean_operation("AudioLibrary.Clean"))
+        self.assertFalse(is_clean_operation("VideoLibrary.Scan"))
+        self.assertEqual(library_http_timeout("VideoLibrary.Scan", 60), 60)
+        self.assertGreaterEqual(library_http_timeout("VideoLibrary.Clean", 120), 86400)
+
+    def test_clean_timeout_env_override(self):
+        from webapp import library_http_timeout
+
+        with mock.patch.dict(os.environ, {"LIBRARY_CLEAN_TIMEOUT_SECONDS": "300"}, clear=False):
+            self.assertEqual(library_http_timeout("AudioLibrary.Clean", 120), 300)
+
+
 class TestRpcErrorFormat(unittest.TestCase):
     def test_format(self):
         from webapp import _format_kodi_rpc_error
@@ -285,6 +302,84 @@ class TestRpcErrorFormat(unittest.TestCase):
             {"message": "CleanLibrary is not possible while scanning for media info"}
         )
         self.assertIn("CleanLibrary", msg)
+
+
+class TestCustomServers(unittest.TestCase):
+    def test_add_persists_and_reloads(self):
+        import custom_servers
+
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "custom_servers.json")
+            store = custom_servers.CustomServerStore(path=path)
+            row, err = store.add("http://10.0.0.50:8080", "kodi", "secret", "Shed")
+            self.assertIsNone(err)
+            self.assertEqual(row["id"], "100")
+            self.assertEqual(row["label"], "Shed")
+            reopened = custom_servers.CustomServerStore(path=path)
+            listed = reopened.list_servers()
+            self.assertEqual(len(listed), 1)
+            self.assertEqual(listed[0]["host"], "http://10.0.0.50:8080")
+            self.assertEqual(listed[0]["password"], "secret")
+
+    def test_duplicate_host_rejected(self):
+        import custom_servers
+
+        with tempfile.TemporaryDirectory() as td:
+            store = custom_servers.CustomServerStore(path=os.path.join(td, "custom_servers.json"))
+            store.add("http://10.0.0.50:8080", label="One")
+            row, err = store.add("http://10.0.0.50:8080", label="Two")
+            self.assertIsNone(row)
+            self.assertIn("already", err.lower())
+
+    def test_encrypts_when_secret_set(self):
+        import custom_servers
+
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "custom_servers.json")
+            with mock.patch.dict(os.environ, {"WEB_SECRET_KEY": "persistent-secret"}, clear=False):
+                store = custom_servers.CustomServerStore(path=path)
+                store.add("http://10.0.0.8:8080", "u", "p", "Lab")
+                raw = json.loads(Path(path).read_text(encoding="utf-8"))
+                saved = raw["servers"][0]
+                self.assertIn("password_enc", saved)
+                self.assertNotIn("password", saved)
+                self.assertTrue(saved["password_enc"].startswith("enc:v1:"))
+
+    def test_api_add_and_delete(self):
+        import custom_servers
+        from webapp import create_app
+
+        with tempfile.TemporaryDirectory() as td:
+            store = custom_servers.CustomServerStore(path=os.path.join(td, "custom_servers.json"))
+            with mock.patch.object(custom_servers, "_store", store), mock.patch.dict(
+                os.environ, {"BASIC_AUTH": "", "WEB_SECRET_KEY": "test-secret"}, clear=False
+            ):
+                app = create_app()
+                client = app.test_client()
+                created = client.post(
+                    "/api/servers",
+                    json={
+                        "host": "10.0.0.50",
+                        "port": 8080,
+                        "scheme": "http",
+                        "label": "Shed",
+                        "username": "kodi",
+                        "password": "secret",
+                    },
+                )
+                self.assertEqual(created.status_code, 200)
+                body = created.get_json()
+                self.assertTrue(body["success"])
+                server_id = body["server"]["id"]
+                self.assertEqual(int(server_id), 100)
+                self.assertTrue(body["server"]["editable"])
+                self.assertNotIn("password", body["server"])
+                listed = client.get("/api/servers").get_json()["servers"]
+                self.assertTrue(any(row["id"] == server_id for row in listed))
+                deleted = client.delete("/api/servers/" + str(server_id))
+                self.assertEqual(deleted.status_code, 200)
+                remaining = client.get("/api/servers").get_json()["servers"]
+                self.assertTrue(all(row["id"] != server_id for row in remaining))
 
 
 if __name__ == "__main__":

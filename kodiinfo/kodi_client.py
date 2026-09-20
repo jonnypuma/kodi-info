@@ -700,6 +700,7 @@ def collect_preset_kodi_servers() -> List[Dict[str, str]]:
                 "host": row["host"],
                 "username": row["username"],
                 "password": row["password"],
+                "source": "env",
             }
         )
     return out

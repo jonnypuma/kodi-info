@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/static/css/app.css">
 </head>
 <body>
+  <div id="app-version" class="version-badge" hidden></div>
   <div id="app">
     <section id="view-login" class="panel login-panel" hidden>
       <div class="login-card">
@@ -35,8 +36,10 @@
         <div id="server-overview-grid" class="server-overview-grid"></div>
         <div class="custom-server-panel">
           <h2>Custom server</h2>
-          <p class="muted">Connect to a Kodi endpoint that is not configured in Docker Compose.</p>
+          <p class="muted">Save a Kodi endpoint to this overview. Saved servers are stored on the server volume and survive rebuilds.</p>
           <div class="server-form">
+            <label for="custom-label">Label (optional)</label>
+            <input id="custom-label" type="text" placeholder="e.g. Living room" autocomplete="off">
             <label for="custom-host">Host or IP</label>
             <div class="custom-host-wrap">
               <input id="custom-host" type="text" placeholder="e.g. 192.168.1.50" autocomplete="off" aria-controls="custom-recent-dropdown">
@@ -60,8 +63,10 @@
             <label for="custom-pass">Password (optional)</label>
             <input id="custom-pass" type="password" autocomplete="current-password">
             <div class="form-actions">
-              <button type="button" class="btn btn-primary" id="load-btn">Load custom library</button>
+              <button type="button" class="btn btn-primary" id="save-server-btn">Add to overview</button>
+              <button type="button" class="btn" id="load-btn">Load without saving</button>
             </div>
+            <p id="custom-server-status" class="muted" hidden></p>
           </div>
         </div>
       </div>
@@ -99,6 +104,10 @@
           <button id="clean-music-btn" class="btn" type="button">Clean Music Library</button>
           <img src="/refresh.png" alt="Refresh" id="refresh-btn" class="refresh-icon" title="Refresh library (same server)">
         </div>
+        <label class="option-toggle" for="refresh-after-scan">
+          <input id="refresh-after-scan" type="checkbox">
+          Refresh library stats when a scan finishes
+        </label>
         <div id="library-action-status" class="action-status" role="status" aria-live="polite" hidden>
           <div id="library-action-status-body" class="action-status-body"></div>
           <button type="button" id="library-action-status-close" class="action-status-close" aria-label="Dismiss">&times;</button>

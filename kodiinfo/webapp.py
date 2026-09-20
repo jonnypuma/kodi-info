@@ -21,6 +21,7 @@ import requests
 from flask import Flask, jsonify, request, send_file, send_from_directory, session
 
 import connection_tokens
+import custom_servers
 import library_actions
 import operation_store
 from kodi_client import (
@@ -40,7 +41,7 @@ from kodi_client import (
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 TRACE_LEVEL = 5
 LIBRARY_COMMANDS = {
     "VideoLibrary.Scan": ("video_scan", 60.0),
@@ -49,6 +50,32 @@ LIBRARY_COMMANDS = {
     "AudioLibrary.Clean": ("music_clean", 120.0),
 }
 logging.addLevelName(TRACE_LEVEL, "TRACE")
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def is_clean_operation(method: str) -> bool:
+    return str(method or "").endswith(".Clean")
+
+
+def library_http_timeout(method: str, default_wait: float) -> float:
+    """HTTP read timeout for the initial Kodi JSON-RPC call.
+
+    Scan returns quickly (accepted), then we poll IsScanning*. Clean is often
+    a blocking RPC (showdialogs default true / CleanLibraryModal) that only
+    returns when the database cleanup finishes — 120s is far too short.
+    """
+    if is_clean_operation(method):
+        return max(120.0, _env_float("LIBRARY_CLEAN_TIMEOUT_SECONDS", 86400.0))
+    try:
+        return max(5.0, float(default_wait))
+    except (TypeError, ValueError):
+        return 60.0
 
 
 def _configure_logging() -> None:
@@ -105,7 +132,13 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
 
     load_jobs: Dict[str, Dict[str, Any]] = {}
     load_lock = threading.Lock()
-    preset_servers = collect_preset_kodi_servers()
+    preset_servers: List[Dict[str, Any]] = []
+
+    def _reload_preset_servers() -> None:
+        env = collect_preset_kodi_servers()
+        preset_servers[:] = custom_servers.merged_presets(env)
+
+    _reload_preset_servers()
     seen_hosts = set()
     for preset in preset_servers:
         host = str(preset.get("host") or "").strip()
@@ -361,6 +394,19 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
         except ValueError:
             status_grace, status_timeout = 7200.0, 86400.0
 
+        if is_clean_operation(method):
+            _run_library_clean_job(
+                job,
+                conn,
+                probe,
+                method,
+                action_key,
+                media,
+                target,
+                resume_monitor_only=resume_monitor_only,
+            )
+            return
+
         if resume_monitor_only:
             prior_state = str(job.get("state") or "")
             observed_scanning = prior_state == "running"
@@ -374,7 +420,7 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
             logger.info("Resumed library operation monitor: %s → %s", method, target)
         else:
             operation_store.update(server_key, job_id, state="running", message="Contacting Kodi")
-            response, err = _kodi_rpc_post(probe, method, read_timeout=max_wait_s)
+            response, err = _kodi_rpc_post(probe, method, read_timeout=library_http_timeout(method, max_wait_s))
             if err:
                 logger.warning("Library action failed: %s → %s — %s", method, target, err)
                 operation_store.update(
@@ -453,6 +499,92 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
                 logger.warning("Library action status timed out: %s → %s", method, target)
                 return
             time.sleep(5)
+
+    def _run_library_clean_job(
+        job: Dict[str, Any],
+        conn: Dict[str, Any],
+        probe: KodiLibraryProbe,
+        method: str,
+        action_key: str,
+        media: str,
+        target: str,
+        resume_monitor_only: bool = False,
+    ) -> None:
+        """Clean is not IsScanning*. Default Kodi Clean RPC blocks until cleanup finishes."""
+        server_key = job["server_key"]
+        job_id = job["job_id"]
+        message = f"Kodi is cleaning the {media} library"
+        timeout_s = library_http_timeout(method, 86400.0)
+        stop_heartbeat = threading.Event()
+
+        def heartbeat() -> None:
+            while not stop_heartbeat.wait(10):
+                operation_store.update(server_key, job_id, state="running", message=message)
+
+        operation_store.update(server_key, job_id, state="running", message=message)
+        hb = threading.Thread(target=heartbeat, name=f"clean-hb-{job_id[:8]}", daemon=True)
+        hb.start()
+        try:
+            if resume_monitor_only:
+                logger.info("Resumed library clean monitor: %s → %s", method, target)
+                deadline = time.time() + timeout_s
+                try:
+                    started = datetime.fromisoformat(str(job.get("started_at") or "")).timestamp()
+                    deadline = started + timeout_s
+                except (TypeError, ValueError):
+                    pass
+                while time.time() < deadline:
+                    ping = probe._make_request("JSONRPC.Ping", {}, timeout=10)
+                    if ping.get("result") == "pong":
+                        try:
+                            library_actions.record_action(conn["host"], action_key)
+                        except Exception:
+                            logger.exception("Could not persist library action (job=%s)", job_id[:8])
+                        operation_store.update(
+                            server_key,
+                            job_id,
+                            state="completed",
+                            message="Kodi reports that the library clean has finished",
+                        )
+                        logger.info("Library clean completed after resume: %s → %s", method, target)
+                        return
+                    time.sleep(5)
+                operation_store.update(
+                    server_key,
+                    job_id,
+                    state="timed_out",
+                    message="Timed out waiting for Kodi to finish cleaning",
+                )
+                logger.warning("Library clean timed out after resume: %s → %s", method, target)
+                return
+
+            _, err = _kodi_rpc_post(probe, method, read_timeout=timeout_s)
+            if err == "timeout":
+                operation_store.update(
+                    server_key,
+                    job_id,
+                    state="timed_out",
+                    message="Timed out waiting for Kodi to finish cleaning",
+                )
+                logger.warning("Library clean timed out: %s → %s", method, target)
+                return
+            if err:
+                logger.warning("Library action failed: %s → %s — %s", method, target, err)
+                operation_store.update(server_key, job_id, state="failed", message=err)
+                return
+            try:
+                library_actions.record_action(conn["host"], action_key)
+            except Exception:
+                logger.exception("Could not persist library action (job=%s)", job_id[:8])
+            operation_store.update(
+                server_key,
+                job_id,
+                state="completed",
+                message="Kodi reports that the library clean has finished",
+            )
+            logger.info("Library action completed: %s → %s", method, target)
+        finally:
+            stop_heartbeat.set()
 
     def _dispatch_library_command(
         method: str, action_key: str, max_wait_s: float
@@ -663,11 +795,19 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
         session.clear()
         return jsonify({"success": True})
 
+    def _public_server_row(preset: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": preset.get("id"),
+            "label": preset.get("label") or preset.get("host"),
+            "host": preset.get("host"),
+            "source": preset.get("source") or "env",
+            "editable": (preset.get("source") == "custom"),
+            "has_auth": bool(preset.get("username")),
+        }
+
     @app.route("/api/config")
     def api_config():
-        presets = [
-            {"id": p["id"], "label": p["label"], "host": p["host"]} for p in preset_servers
-        ]
+        presets = [_public_server_row(p) for p in preset_servers]
         return jsonify(
             {
                 "version": APP_VERSION,
@@ -679,8 +819,62 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
 
     @app.route("/api/servers")
     def api_servers():
-        payload = [{"id": p["id"], "label": p["label"], "host": p["host"]} for p in preset_servers]
-        return jsonify({"servers": payload})
+        return jsonify({"success": True, "servers": [_public_server_row(p) for p in preset_servers]})
+
+    @app.route("/api/servers", methods=["POST"])
+    def api_create_server():
+        payload = request.get_json(silent=True) or {}
+        host, err = custom_servers.resolve_custom_host(payload)
+        if err or not host:
+            return jsonify({"success": False, "message": err or "Invalid address"}), 400
+        existing = [str(p.get("host") or "") for p in preset_servers]
+        server, err = custom_servers.add(
+            host,
+            payload.get("username") or "",
+            payload.get("password") or "",
+            payload.get("label") or "",
+            existing_hosts=existing,
+        )
+        if err or not server:
+            return jsonify({"success": False, "message": err or "Could not save server"}), 400
+        _reload_preset_servers()
+        logger.info("Saved custom Kodi server %s [%s]", server.get("label"), server.get("host"))
+        return jsonify({"success": True, "server": custom_servers.public_payload(server)})
+
+    @app.route("/api/servers/<server_id>", methods=["PUT", "PATCH"])
+    def api_edit_server(server_id: str):
+        current = next((p for p in preset_servers if str(p.get("id")) == str(server_id)), None)
+        if not current or current.get("source") != "custom":
+            return jsonify({"success": False, "message": "Only saved custom servers can be edited"}), 400
+        payload = request.get_json(silent=True) or {}
+        host = None
+        if payload.get("host") is not None:
+            host, err = custom_servers.resolve_custom_host(payload)
+            if err or not host:
+                return jsonify({"success": False, "message": err or "Invalid address"}), 400
+        server, err = custom_servers.update(
+            server_id,
+            host=host,
+            username=payload.get("username"),
+            password=payload.get("password"),
+            label=payload.get("label"),
+        )
+        if err or not server:
+            return jsonify({"success": False, "message": err or "Could not update server"}), 400
+        _reload_preset_servers()
+        return jsonify({"success": True, "server": custom_servers.public_payload(server)})
+
+    @app.route("/api/servers/<server_id>", methods=["DELETE"])
+    def api_delete_server(server_id: str):
+        current = next((p for p in preset_servers if str(p.get("id")) == str(server_id)), None)
+        if not current or current.get("source") != "custom":
+            return jsonify({"success": False, "message": "Only saved custom servers can be removed"}), 400
+        ok, err = custom_servers.delete(server_id)
+        if not ok:
+            return jsonify({"success": False, "message": err or "Could not remove server"}), 400
+        _reload_preset_servers()
+        logger.info("Removed custom Kodi server %s", server_id)
+        return jsonify({"success": True})
 
     def _overview_probe_timeout() -> float:
         try:
@@ -715,6 +909,8 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
             "actions": library_actions.get_actions(conn["host"]),
             "current_operation": current_operation,
             "history": history[:5],
+            "source": preset.get("source") or "env",
+            "editable": (preset.get("source") == "custom"),
         }
 
     @app.route("/api/server-overview")
@@ -751,6 +947,8 @@ def create_app(web_port: int = 5005, container_host: str = "localhost") -> Flask
                         "actions": library_actions.get_actions(preset.get("host") or ""),
                         "current_operation": None,
                         "history": [],
+                        "source": preset.get("source") or "env",
+                        "editable": (preset.get("source") == "custom"),
                     }
         return jsonify({"success": True, "servers": [item for item in result if item]})
 

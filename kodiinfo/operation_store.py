@@ -102,11 +102,26 @@ class OperationStore:
             status_timeout = max(3600.0, _env_float("LIBRARY_STATUS_TIMEOUT_SECONDS", 86400))
             max_scan = max(7200.0, _env_float("LIBRARY_MAX_SCAN_SECONDS", 43200))
             grace = max(60.0, _env_float("LIBRARY_STATUS_GRACE_SECONDS", 7200))
+            op = str(job.get("operation") or "")
+            is_clean = op.endswith(".Clean")
+            max_duration = (
+                max(7200.0, _env_float("LIBRARY_CLEAN_TIMEOUT_SECONDS", 86400))
+                if is_clean
+                else max_scan
+            )
             if state == "running":
                 if now - updated > status_timeout:
-                    return True, "Scan status lost contact with Kodi"
-                if now - started > max_scan:
-                    return True, "Scan exceeded maximum expected duration"
+                    return True, (
+                        "Clean status lost contact with Kodi"
+                        if is_clean
+                        else "Scan status lost contact with Kodi"
+                    )
+                if now - started > max_duration:
+                    return True, (
+                        "Clean exceeded maximum expected duration"
+                        if is_clean
+                        else "Scan exceeded maximum expected duration"
+                    )
             elif state == "accepted":
                 if now - updated > grace:
                     return True, "Operation status expired; Kodi completion could not be confirmed"

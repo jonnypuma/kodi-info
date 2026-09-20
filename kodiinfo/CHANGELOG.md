@@ -10,7 +10,7 @@
 - Dashboard operation timers and last-scan metadata refresh correctly when reopening a cached server.
 - Dashboard operation status now resolves active scans using the connection token, preset id, and migrated server keys.
 - Scan monitoring defaults raised for slow devices (2h grace, 24h idle timeout) and scans without Kodi status reporting stay active for the full run.
-- Dashboard scan status and history now use the same preset-based operation lookup as the server overview.
+- App version badge (`v1.1.0`) in the upper-left corner of the server overview and library dashboard.
 
 ## 1.0.0 - 2026-08-02
 

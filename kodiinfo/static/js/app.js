@@ -3,6 +3,8 @@
   const TOKEN_MAP_KEY = "kodiinfo_server_tokens_v1";
   const RECENT_CUSTOM_KEY = "kodiinfo_recent_custom_v1";
   const RECENT_CUSTOM_MAX = 10;
+  const REFRESH_AFTER_SCAN_KEY = "kodiinfo_refresh_after_scan_v2";
+  const SCAN_FINISHED_MESSAGE = "Kodi reports that the library scan has finished";
   const CACHE_DB = "kodiinfo_dashboard_cache";
   const CACHE_STORE = "dashboards";
   const CACHE_TTL_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
@@ -26,7 +28,7 @@
   let operationTickTimer = null;
   let lastOperationHistorySignature = "";
   let activeOperationJob = null;
-  let operationReloaded = {};
+  let refreshedAfterScan = {};
   let overviewRefreshTimer = null;
   let overviewHasActiveOps = false;
 
@@ -52,6 +54,20 @@
       el.hidden = !on;
       el.style.display = on ? "" : "none";
     });
+    const badge = $("app-version");
+    if (badge) badge.hidden = name === "login";
+  }
+
+  function setAppVersion(version) {
+    const badge = $("app-version");
+    if (!badge) return;
+    const text = String(version || "").trim();
+    if (!text) {
+      badge.hidden = true;
+      badge.textContent = "";
+      return;
+    }
+    badge.textContent = "v" + text.replace(/^v/i, "");
   }
 
   function stopOverviewRefresh() {
@@ -480,6 +496,7 @@
     renderRecentList("recent-albums", recent.albums, "album-cover");
     applyOperationState(data.current_operation, data.operation_history);
     showView("dashboard");
+    loadRefreshAfterScanPref();
     if (opts.actionsReady === false) {
       setLibraryActionsEnabled(false);
     } else {
@@ -729,6 +746,61 @@
     return headers;
   }
 
+  function refreshAfterScanServerKey() {
+    return currentCacheKey || makeCacheKey(lastLoadBody) || "";
+  }
+
+  function refreshAfterScanMap() {
+    try {
+      const raw = localStorage.getItem(REFRESH_AFTER_SCAN_KEY);
+      const parsed = raw ? JSON.parse(raw) : {};
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function getRefreshAfterScan() {
+    const key = refreshAfterScanServerKey();
+    if (!key) return false;
+    return !!refreshAfterScanMap()[key];
+  }
+
+  function loadRefreshAfterScanPref() {
+    const el = $("refresh-after-scan");
+    if (!el) return;
+    el.checked = getRefreshAfterScan();
+  }
+
+  function saveRefreshAfterScanPref() {
+    const el = $("refresh-after-scan");
+    const key = refreshAfterScanServerKey();
+    if (!el || !key) return;
+    const map = refreshAfterScanMap();
+    if (el.checked) map[key] = true;
+    else delete map[key];
+    try {
+      localStorage.setItem(REFRESH_AFTER_SCAN_KEY, JSON.stringify(map));
+    } catch (e) {}
+  }
+
+  function isConfirmedScanFinish(job) {
+    if (!job || job.state !== "completed") return false;
+    const op = String(job.operation || "");
+    if (op !== "VideoLibrary.Scan" && op !== "AudioLibrary.Scan") return false;
+    return String(job.message || "") === SCAN_FINISHED_MESSAGE;
+  }
+
+  function maybeRefreshAfterConfirmedScan(previousJob, history) {
+    if (!getRefreshAfterScan() || loadInProgress) return;
+    const jobId = previousJob && previousJob.job_id;
+    if (!jobId || refreshedAfterScan[jobId]) return;
+    const finished = (history || []).find((item) => item.job_id === jobId);
+    if (!isConfirmedScanFinish(finished)) return;
+    refreshedAfterScan[jobId] = true;
+    refreshDashboard();
+  }
+
   async function refreshOperationState() {
     const onDashboard = $("view-dashboard") && !$("view-dashboard").hidden;
     if (!onDashboard || !canFetchOperationHistory()) return;
@@ -750,6 +822,7 @@
         ? data.history
         : (Array.isArray(data.operation_history) ? data.operation_history : []);
       const prevSig = lastOperationHistorySignature;
+      const previousJob = activeOperationJob;
       const activeFromServer = job && operationIsActive(job) ? job : null;
       if (activeFromServer) {
         renderOperation(activeFromServer);
@@ -763,21 +836,11 @@
           if (!activeFromServer && prevSig) {
             refreshLibraryActionsMeta();
             stopOperationTick();
+            maybeRefreshAfterConfirmedScan(previousJob, history);
           }
         } else if (activeFromServer) {
           updateRunningHistoryRow();
         }
-      }
-      if (!activeFromServer) return;
-      if (activeFromServer.state === "accepted" && !operationReloaded[activeFromServer.job_id]) {
-        operationReloaded[activeFromServer.job_id] = true;
-        // HTTP JSON-RPC confirms acceptance, not scanner completion. Reload
-        // shortly so newly indexed items appear without claiming completion.
-        setTimeout(() => refreshDashboard(), 1500);
-      }
-      if (["completed", "failed", "timed_out"].includes(activeFromServer.state)) {
-        refreshLibraryActionsMeta();
-        stopOperationTick();
       }
     } catch (e) {}
   }
@@ -975,6 +1038,7 @@
       scheme: ($("custom-scheme") && $("custom-scheme").value) || "http",
       username: ($("custom-user") && $("custom-user").value) || "",
       password: ($("custom-pass") && $("custom-pass").value) || "",
+      label: ($("custom-label") && $("custom-label").value) || "",
       recent_limit: recentLimit,
     };
   }
@@ -1270,6 +1334,53 @@
     }
   }
 
+  async function saveCustomServer() {
+    const status = $("custom-server-status");
+    const body = buildCustomServerPayload();
+    if (status) {
+      status.hidden = false;
+      status.textContent = "Saving…";
+    }
+    try {
+      const res = await fetch("/api/servers", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        throw new Error((data && data.message) || ("HTTP " + res.status));
+      }
+      recentCustomSave(body);
+      if (status) status.textContent = "Saved to overview: " + ((data.server && data.server.label) || body.host);
+      if ($("custom-pass")) $("custom-pass").value = "";
+      await showOverview();
+    } catch (e) {
+      if (status) status.textContent = (e && e.message) || "Could not save server";
+    }
+  }
+
+  async function removeSavedServer(server) {
+    const name = (server && (server.label || server.host)) || "this server";
+    if (!window.confirm("Remove " + name + " from the overview? Compose presets are not affected.")) {
+      return;
+    }
+    try {
+      const res = await fetch("/api/servers/" + encodeURIComponent(String(server.id)), {
+        method: "DELETE",
+        credentials: "same-origin",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        throw new Error((data && data.message) || ("HTTP " + res.status));
+      }
+      await showOverview();
+    } catch (e) {
+      window.alert((e && e.message) || "Could not remove server");
+    }
+  }
+
   async function openOverviewServer(server, forceRefresh) {
     const body = { preset: String(server.id), recent_limit: config.default_recent_limit || 10 };
     await startLoad(body, { forceRefresh: !!forceRefresh });
@@ -1336,6 +1447,14 @@
         refresh.textContent = "Refresh";
         refresh.addEventListener("click", () => openOverviewServer(server, true));
         actions.appendChild(refresh);
+        if (server.editable) {
+          const remove = document.createElement("button");
+          remove.type = "button";
+          remove.className = "btn btn-danger";
+          remove.textContent = "Remove";
+          remove.addEventListener("click", () => removeSavedServer(server));
+          actions.appendChild(remove);
+        }
         grid.appendChild(card);
       });
       startOverviewRefresh();
@@ -1394,6 +1513,7 @@
     } catch (e) {
       config = { presets: [], default_recent_limit: 10, recent_limit_options: [5, 10, 20, 50] };
     }
+    setAppVersion(config.version);
     const sel = $("recent-limit-select");
     if (sel && config.default_recent_limit) sel.value = String(config.default_recent_limit);
 
@@ -1408,6 +1528,9 @@
         showLoadError((e && e.message) || String(e));
       }
     });
+    if ($("save-server-btn")) {
+      $("save-server-btn").addEventListener("click", () => saveCustomServer());
+    }
     $("load-error-home-btn").addEventListener("click", () => {
       resetLoadError();
       loadInProgress = false;
@@ -1427,6 +1550,9 @@
       showOverview();
     });
     $("refresh-btn").addEventListener("click", () => refreshDashboard());
+    if ($("refresh-after-scan")) {
+      $("refresh-after-scan").addEventListener("change", saveRefreshAfterScanPref);
+    }
     $("update-video-btn").addEventListener("click", () =>
       libraryAction("/api/update-video-library", "Update Video Library", $("update-video-btn"))
     );
