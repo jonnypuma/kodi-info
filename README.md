@@ -1,5 +1,7 @@
 # Kodi Library Information
 
+**Project page:** [jonnypuma.github.io/#/kodi-info](https://jonnypuma.github.io/#/kodi-info) · **All add-ons and apps by jonnypuma:** [jonnypuma.github.io](https://jonnypuma.github.io/)
+
 Python + Flask app that connects to Kodi via JSON-RPC and shows library statistics in a browser (Homarr-friendly).
 
 ## Architecture
